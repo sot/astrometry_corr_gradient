@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+*.egg-info/
+# telemetry and safing-interval caches
+cache/
+# made by the notebooks
+notebooks/*.ecsv
+notebooks/*.png
+.pytest_cache/
+.ruff_cache/

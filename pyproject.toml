@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "astrometry-corr-gradient"
+version = "0.1.0"
+description = "Chandra astrometry: the gradient term (OOBAGRD3, OOBAGRD6) and its calibration from an astromon database."
+requires-python = ">=3.11"
+dependencies = ["numpy", "astropy"]
+
+[project.optional-dependencies]
+# the calibration (crossmatch, calalign, telemetry, calibration): the Ska environment's packages
+calibration = ["h5py", "cxotime", "kadi", "cheta"]
+# scripts/update_calalign_table.py only
+calalign = ["Quaternion"]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["astrometry_corr_gradient*"]
+
+[tool.setuptools.package-data]
+astrometry_corr_gradient = ["data/*.ecsv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
