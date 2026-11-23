@@ -57,7 +57,7 @@ from update_gradient_term_data import RELEASE_QUARTER
 
 from astrometry_corr_gradient import calibration, gradient_term
 
-DATABASE = "/Users/jean/git/astrometry_scratch_20260929/median_bins_telemetry/snapshots/astromon_gaussian_redo_20261105_1141.h5"
+DATABASE = "/Users/jean/git/astrometry_scratch_20260929/median_bins_telemetry/snapshots/astromon_gaussian_redo_20261122_2132.h5"
 CACHE_DIR = Path.cwd().parent / "cache"
 CALIBRATION_PATH = Path("gradient_term_calibration_set.ecsv")
 START = "2004:001"

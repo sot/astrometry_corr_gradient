@@ -25,10 +25,16 @@ quarter.
   CALALIGN matrix, the telemetry helpers, and linked groups and bootstraps.
 - `astrometry_corr_gradient/data/calalign_matrices.ecsv`: every CALALIGN
   matrix ever shipped, retired ones included, one row per file and detector.
+- `astrometry_corr_gradient/mock_n0011.py` and
+  `data/calalign_mock_n0011.ecsv`: a mock N0011, the quarterly CALALIGN
+  matrices from 2021-07-02 that the plan would ship, with a placeholder CALDB
+  release. Kept apart from the shipped matrices; the residual check uses them.
 - `scripts/update_gradient_term_data.py`: writes the numbers into
   `gradient_term.py` from the calibration set.
 - `scripts/update_calalign_table.py`: rewrites the CALALIGN data file from a
   folder of CALALIGN files, when a new one ships.
+- `scripts/make_mock_n0011.py`: rewrites the mock N0011 file from the
+  calibration set.
 - `notebooks/`: the calibration, the prototype for the developers, and the
   residual check. Each notebook is built by its `build_*.py` script.
 
@@ -40,7 +46,8 @@ quarter.
    intervals are cached in `cache/`, so a rerun fetches only what is new.
 2. `python scripts/update_gradient_term_data.py` writes the numbers into
    `gradient_term.py`.
-3. Rerun `gradient_term_prototype.ipynb` and `gradient_term_validation.ipynb`.
+3. `python scripts/make_mock_n0011.py` rewrites the mock N0011 matrices.
+4. Rerun `gradient_term_prototype.ipynb` and `gradient_term_validation.ipynb`.
 
 The astromon database is the only input from outside this repo. The
 calibration also uses the Ska environment's cheta, kadi and cxotime.

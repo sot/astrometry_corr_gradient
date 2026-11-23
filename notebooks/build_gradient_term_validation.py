@@ -36,20 +36,24 @@ quarter's values everywhere.
 **The CALALIGN values**
 
 - **Before 2021-07-02:** today's CALDB.
-- **After 2021-07-02:** today's CALDB has no values, so the check makes them
-  the old way: each quarter's median offset, without the term, plus one
-  constant per detector.
-- **No source corrects itself:** its own-quarter median leaves out the source
-  and the sources linked to it.
+- **From 2021-07-02:** the mock N0011 matrices,
+  `astrometry_corr_gradient/data/calalign_mock_n0011.ecsv`. One per quarter and
+  detector, made the old way: each quarter's median offset, without the term,
+  plus one constant per detector. They go through the same matrix code as the
+  shipped CALALIGN files.
+- **In-sample, like today's CALDB:** a quarter's matrix is made from all of its
+  sources, the scored ones included.
 
 **What it shows**
 
 - **The module's numbers** come back exactly from the calibration set.
-- **The term helps in every period.** dr r68 / r90 drops from 0.349" / 0.578"
-  to 0.287" / 0.472" before 2021-07-02, and from 0.594" / 0.879" to 0.396" /
-  0.637" since.
-- **The plan beats lagging throughout since 2021-07-02**, by 0.030" / 0.044".
-  Before 2021-07-02 they tie.
+- **The mock N0011 matrices work.** Before 2021-07-02 nothing changes; after
+  it, each quarter's median is at zero, as intended.
+- **The term helps in every period.** dr r68 / r90 drops from 0.353" / 0.586"
+  to 0.290" / 0.480" before 2021-07-02, and from 0.585" / 0.861" to 0.385" /
+  0.621" since.
+- **The plan beats lagging throughout since 2021-07-02**, by 0.049" in r68 and
+  0.079" in r90. Before 2021-07-02 they tie.
 - **The biggest difference is Safe Mode #10, in late 2022.** Lagging spikes
   there; the plan doesn't.
 
@@ -63,19 +67,30 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from astropy.table import Table
+from astropy.table import Table, vstack
 from astropy.time import Time
 
 # this checkout's package, before any installed copy
 sys.path.insert(0, str(Path.cwd().parent))
 sys.path.insert(1, str(Path.cwd().parent / "scripts"))
+from make_mock_n0011 import MOCK_PATH, build
 from update_gradient_term_data import (
     RELEASE_QUARTER,
     handoff_data,
 )
 
 from astrometry_corr_gradient import gradient_term
+from astrometry_corr_gradient.calalign import (
+    calalign_table,
+    current_caldb_matrices,
+    latest_matrices,
+)
 from astrometry_corr_gradient.groups import block_bootstrap_difference
+from astrometry_corr_gradient.mock_n0011 import (
+    detector_constants,
+    mock_matrices,
+    quarter_levels,
+)
 
 AXES = gradient_term.AXES
 inputs = Table.read("gradient_term_calibration_set.ecsv", format="ascii.ecsv")
@@ -83,7 +98,6 @@ dates = np.asarray(inputs["date"]).astype(str)
 years = np.asarray(inputs["year"], float)
 assert np.all(np.diff(years) >= 0), "the sources should be in time order"
 detectors = np.asarray(inputs["detector"]).astype(str)
-groups = np.asarray(inputs["linked_group"])
 offsets = {
     axis_name: np.asarray(inputs[f"{axis_name}_rebased"], float) for axis_name in AXES
 }
@@ -137,68 +151,98 @@ blocks; "tie" means it doesn't.
 """
 
 code_residuals = r'''
-CUTOVER_DATE = "2021-07-02"  # today's last CALALIGN value
-EXEMPT = {"dz": (), "dy": ("HRC-I",)}  # detectors with no constant
-MINIMUM = gradient_term.MIN_OBSERVATIONS
+CUTOVER_DATE = "2021-07-02"  # today's last CALALIGN value; mock N0011 from here
+shipped = calalign_table()
+reference = latest_matrices(shipped)  # what the offsets are rebased onto
+times = Time(dates).cxcsec
+reference_offsets = {
+    axis_name: np.array([reference[detector][axis_name] for detector in detectors])
+    for axis_name in AXES
+}
+last_complete = export_quarter - 1
 
 
-def previous_level(offset: np.ndarray, index: int) -> float:
-    """The previous quarter's median of all sources (the latest earlier ones if it has too few)."""
-    before = np.isfinite(offset) & (quarters < index)
-    previous = before & (quarters == index - 1)
-    chosen = (
-        previous if previous.sum() >= MINIMUM else np.flatnonzero(before)[-MINIMUM:]
+def after_calalign(mock: Table) -> dict[str, np.ndarray]:
+    """The offsets if processed with today's CALDB plus the mock N0011 matrices."""
+    current_dy, current_dz = current_caldb_matrices(
+        detectors, times, vstack([shipped, mock], metadata_conflicts="silent")
     )
-    return float(np.median(offset[chosen])) if np.size(offset[chosen]) else np.nan
+    current = {"dz": current_dz, "dy": current_dy}
+    return {
+        axis_name: offsets[axis_name]
+        + (current[axis_name] - reference_offsets[axis_name])
+        for axis_name in AXES
+    }
 
 
-def quarter_levels(offset: np.ndarray, own_before: int) -> np.ndarray:
-    """Each source's level: before own_before, its own quarter's median leaving out its linked group;
-    from then on, the previous quarter's median."""
-    finite = np.isfinite(offset)
-    level = np.full(len(offset), np.nan)
-    for index in np.unique(quarters):
-        in_quarter = quarters == index
-        if index >= own_before:
-            level[in_quarter] = previous_level(offset, index)
-            continue
-        for group in np.unique(groups[in_quarter]):
-            others = finite & in_quarter & (groups != group)
-            members = in_quarter & (groups == group)
-            enough = others.sum() >= MINIMUM
-            level[members] = (
-                np.median(offset[others]) if enough else previous_level(offset, index)
-            )
-    return level
+# the plan: the saved mock N0011 (own quarters before the release); lagging throughout: every quarter lags
+saved = calalign_table(MOCK_PATH)
+fresh = build(inputs)
+assert list(saved["start"]) == list(fresh["start"])
+assert list(saved["detector"]) == list(fresh["detector"])
+for axis_name in AXES:
+    assert np.allclose(saved[axis_name], fresh[axis_name], rtol=0, atol=1e-9)
+mocks = {
+    "within chunk": saved,
+    "lagging": mock_matrices(
+        inputs, last_complete_quarter=last_complete, lagging_from=int(quarters.min())
+    ),
+}
+calaligns = {scheme: after_calalign(mock) for scheme, mock in mocks.items()}
+print(
+    f"the saved mock N0011 ({len(saved)} matrices, {saved['start'][0]} to {saved['start'][-1]})"
+    " matches a fresh build from the calibration set"
+)
 
-
-def after_calalign(own_before: int) -> dict[str, np.ndarray]:
-    """The offsets after the CALALIGN values: today's CALDB to 2021-07-02, then the quarterly stand-in."""
-    out = {}
-    for axis_name in AXES:
-        first = offsets[axis_name] - quarter_levels(offsets[axis_name], own_before)
-        constants = {
-            detector: 0.0
-            if detector in EXEMPT[axis_name]
-            else float(np.median(first[np.isfinite(first) & (detectors == detector)]))
-            for detector in np.unique(detectors)
-        }
-        stand_in = first - np.array([constants[detector] for detector in detectors])
-        today = offsets[axis_name] + np.asarray(
-            inputs[f"{axis_name}_caldb_shift"], float
+# before 2021-07-02 the mock changes nothing: today's CALDB
+before = dates < CUTOVER_DATE
+for axis_name in AXES:
+    today = offsets[axis_name] + np.asarray(inputs[f"{axis_name}_caldb_shift"], float)
+    for by_axis in calaligns.values():
+        assert np.allclose(
+            by_axis[axis_name][before], today[before], rtol=0, atol=1e-9, equal_nan=True
         )
-        out[axis_name] = np.where(dates >= CUTOVER_DATE, stand_in, today)
-    return out
+print("before 2021-07-02: today's CALDB, unchanged")
 
+# each quarter's median is at zero once the detector constants are added back;
+# the first quarter's also counts its sources from before 2021-07-02, which keep today's CALDB
+first_mock_quarter = int(gradient_term.quarter_index(CUTOVER_DATE)[0])
+levels = quarter_levels(
+    inputs, last_complete, gradient_term.label_index(RELEASE_QUARTER)
+)
+constants = detector_constants(inputs, levels)
+for axis_name in AXES:
+    added_back = calaligns["within chunk"][axis_name] + np.array(
+        [constants[axis_name][detector] for detector in detectors]
+    )
+    medians = {
+        index: float(
+            np.median(added_back[(quarters == index) & np.isfinite(added_back)])
+        )
+        for index in range(first_mock_quarter, last_complete + 1)
+    }
+    assert all(
+        abs(median) < 1e-9
+        for index, median in medians.items()
+        if index > first_mock_quarter
+    )
+    print(
+        f"{axis_name}: each quarter's median is 0 from"
+        f" {gradient_term.quarter_label(first_mock_quarter + 1)};"
+        f" {gradient_term.quarter_label(first_mock_quarter)}'s is"
+        f" {medians[first_mock_quarter]:+.3f} arcsec"
+    )
+early = int(np.sum((quarters == first_mock_quarter) & before))
+print(
+    f"({gradient_term.quarter_label(first_mock_quarter)} has {early} sources from before"
+    " 2021-07-02, which keep today's CALDB)"
+)
 
-# within chunk: own quarters before the release (and before the quarter still filling); lagging throughout:
-# the previous quarter everywhere, for the medians and the references alike
-own_before = min(release_quarter, export_quarter)
 _, first_rows = np.unique(np.asarray(inputs["obsid"]), return_index=True)
 lagging_table = gradient_term.quarter_references(
     quarters[first_rows],
     {name: column[first_rows] for name, column in gradients.items()},
-    last_complete_quarter=export_quarter - 1,
+    last_complete_quarter=last_complete,
     lagging_from=int(quarters.min()),
 )
 for name in gradient_term.GRADIENT_MSIDS:
@@ -208,10 +252,6 @@ terms = {
     "lagging": gradient_term.gradient_term(
         dates, gradients, lagging_table, gradient_term.COEFFICIENTS
     ),
-}
-calaligns = {
-    "within chunk": after_calalign(own_before),
-    "lagging": after_calalign(int(quarters.min())),
 }
 VERSIONS = {}
 for scheme in ("within chunk", "lagging"):
@@ -369,7 +409,12 @@ plt.show()
 markdown_notes = """\
 ## Notes
 
-- **In-sample:** the coefficients were fit on these same sources.
+- **In-sample:** the coefficients were fit on these same sources, and the mock
+  N0011 matrices were made from them.
+- **Leaving each source out of its own quarter's median** (the old stand-in
+  did this, with the sources linked to it) puts the plan since 2021-07-02 at
+  0.401" / 0.645" with the term: 0.016" / 0.024" higher. Lagging doesn't
+  change. The plan then beats lagging by 0.032" in r68; r90 is a tie.
 - **2026Q4** was still filling at the export, so it lags in both schemes.
 - **The 2017-09 spike** is five M30 sources about 2.5" off, with or without
   the term.
