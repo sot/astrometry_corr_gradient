@@ -23,13 +23,12 @@ from astropy.table import Table
 from cxotime import CxoTime
 
 from astrometry_corr_gradient.calalign import latest_matrices
-from astrometry_corr_gradient.gradient_term import (
-    AXES,
+from astrometry_corr_gradient.calibration import (
     MIN_OBSERVATIONS,
-    quarter_index,
     quarter_label,
     quarter_start,
 )
+from astrometry_corr_gradient.gradient_term import AXES, quarter_index
 
 MOCK_RELEASE = "4.13.0"  # a placeholder, later than every shipped release
 FIRST_EPOCH = "2021-07-02"  # today's CALDB has no matrix after this

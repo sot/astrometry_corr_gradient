@@ -14,7 +14,7 @@
 #     rebased offset (scripts/make_mock_n0011.py)'}
 # - {caldb_release: '4.13.0, a placeholder'}
 # - {lagging_from: 2026Q4}
-# - {made_from: 'gradient_term_calibration_set.ecsv, made 2026-11-23 02:33 UTC, database /Users/jean/git/astrometry_scratch_20260929/median_bins_telemetry/snapshots/astromon_gaussian_redo_20261122_2132.h5'}
+# - {made_from: 'gradient_term_calibration_set.ecsv, made 2026-11-23 03:35 UTC, database /Users/jean/git/astrometry_scratch_20260929/median_bins_telemetry/snapshots/astromon_gaussian_redo_20261122_2132.h5'}
 # schema: astropy-2.0
 file version caldb_version detector start stop dy dz
 "mock N0011 2021Q3" N0011 4.13.0 ACIS-I 2021-07-02 2021-10-01 85.25717102634816 50.48537136586496

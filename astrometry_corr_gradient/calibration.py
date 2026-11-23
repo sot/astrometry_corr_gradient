@@ -14,8 +14,9 @@ Four steps, each a function:
    observation's OOBAGRD3 and OOBAGRD6 averaged over its dwell, bad telemetry
    masked, and what today's CALDB adds to each offset. One row per source, in
    time order.
-4. ``solve()``: the coefficients, sigmas and reference table, with
-   ``astrometry_corr_gradient.gradient_term``'s functions.
+4. ``solve()``: the coefficients, sigmas and reference table, with the
+   functions just before it (``quarter_references()``, ``fit_coefficients()``,
+   ``within_quarter_sigma()``).
 
 The only input is the astromon database. The telemetry comes from cheta
 (``gradient_series()``) and the safing intervals from kadi and cheta
@@ -33,10 +34,7 @@ from astrometry_corr_gradient.crossmatch import inconsistent_obsid_mask
 from astrometry_corr_gradient.gradient_term import (
     AXES,
     GRADIENT_MSIDS,
-    fit_coefficients,
     quarter_index,
-    quarter_references,
-    within_quarter_sigma,
 )
 from astrometry_corr_gradient.groups import linked_group_ids
 from astrometry_corr_gradient.telemetry import (
@@ -48,6 +46,7 @@ from astrometry_corr_gradient.telemetry import (
 )
 
 FIRST_YEAR = 2004  # the calibration starts here
+MIN_OBSERVATIONS = 10  # a quarter needs this many observations to set a reference
 SAME_OBSID_THRESHOLD = 0.75  # arcsec; see crossmatch.inconsistent_obsid_mask
 COLUMN_DESCRIPTIONS = {
     "obsid": "the observation",
@@ -233,6 +232,151 @@ def calibration_set(
     return table
 
 
+# ---- the solve's pieces: quarters, the reference table, the coefficients and the sigmas ----
+
+
+def quarter_label(index: int) -> str:
+    """2024Q3 for the quarter that starts on 2024-07-01."""
+    return f"{index // 4}Q{index % 4 + 1}"
+
+
+def quarter_start(index: int) -> str:
+    """The quarter's first day, e.g. 2024-07-01."""
+    return f"{index // 4}-{3 * (index % 4) + 1:02d}-01"
+
+
+def quarter_references(
+    quarters: np.ndarray,
+    gradients: dict,
+    last_complete_quarter: int,
+    *,
+    lagging_from: int | None,
+    min_observations: int = MIN_OBSERVATIONS,
+) -> Table:
+    """Make the reference table: one row per quarter Q, the OOBAGRD3 and OOBAGRD6 that observations in Q use.
+
+    History, before ``lagging_from``, uses each quarter's own medians. From
+    ``lagging_from`` (the release) on, a quarter uses the previous quarter's
+    medians, and they never change. The quarter still filling always uses the
+    previous one, having no medians of its own yet. Make the CALALIGN values
+    the same way: the CALALIGN median and the reference come from the same
+    quarter. Run it when a quarter ends, to add the next row.
+
+    Parameters
+    ----------
+    quarters : numpy.ndarray
+        Each observation's ``quarter_index()``; one value per observation, not per source.
+    gradients : dict
+        OOBAGRD3 and OOBAGRD6 per observation (K).
+    last_complete_quarter : int
+        The latest quarter that has ended; later observations set no reference.
+    lagging_from : int or None
+        The first quarter that lags (the release); None: none does, apart from
+        the quarter still filling.
+    min_observations : int
+        A quarter needs this many observations with both gradients; with fewer,
+        the latest earlier quarter that has enough is used.
+
+    Returns
+    -------
+    astropy.table.Table
+        From the first quarter that has a reference through the quarter after
+        ``last_complete_quarter`` (the one now filling): its label and first
+        day, the quarter the reference comes from, the number of observations
+        behind it, and each gradient's median over them.
+
+    Raises
+    ------
+    ValueError
+        If no complete quarter has enough observations.
+    """
+    columns = {name: np.asarray(gradients[name], float) for name in GRADIENT_MSIDS}
+    usable = np.all([np.isfinite(column) for column in columns.values()], axis=0)
+    medians, counts = {}, {}
+    for index in np.unique(quarters[usable]):
+        rows = usable & (quarters == index)
+        if index <= last_complete_quarter and rows.sum() >= min_observations:
+            medians[int(index)] = {
+                name: float(np.median(column[rows])) for name, column in columns.items()
+            }
+            counts[int(index)] = int(rows.sum())
+    if not medians:
+        raise ValueError(
+            f"no complete quarter has {min_observations} observations with both gradients"
+        )
+    sources = np.array(sorted(medians))
+    table_rows = []
+    for index in range(int(sources[0]), last_complete_quarter + 2):
+        own = lagging_from is None or index < lagging_from
+        candidates = sources[sources <= index] if own else sources[sources < index]
+        if candidates.size == 0:
+            continue  # a lagging first quarter has nothing before it
+        source = int(candidates.max())
+        table_rows.append(
+            {
+                "quarter": quarter_label(index),
+                "start": quarter_start(index),
+                "from_quarter": quarter_label(source),
+                "observations": counts[source],
+            }
+            | medians[source]
+        )
+    return Table(rows=table_rows)
+
+
+def fit_coefficients(
+    quarters: np.ndarray, offset: np.ndarray, gradients: dict
+) -> dict[str, float]:
+    """One axis's coefficients (arcsec per K), fit within calendar quarters. Done once; not part of processing.
+
+    One row per matched source. Each quarter's mean is taken out of the offset
+    and of both gradients, then one least-squares fit with no intercept, so the
+    coefficients follow how the offset moves with the gradients inside a
+    quarter, not their slow drift over the years.
+    """
+    columns = [np.asarray(gradients[name], float) for name in GRADIENT_MSIDS]
+    usable = np.isfinite(offset) & np.all(
+        [np.isfinite(column) for column in columns], axis=0
+    )
+    _, group = np.unique(quarters[usable], return_inverse=True)
+    counts = np.bincount(group)
+
+    def within_quarter(values: np.ndarray) -> np.ndarray:
+        return (
+            values[usable]
+            - (np.bincount(group, weights=values[usable]) / counts)[group]
+        )
+
+    design = np.column_stack([within_quarter(column) for column in columns])
+    fitted = np.linalg.lstsq(
+        design, within_quarter(np.asarray(offset, float)), rcond=None
+    )[0]
+    return dict(zip(GRADIENT_MSIDS, (float(k) for k in fitted), strict=True))
+
+
+def within_quarter_sigma(quarters: np.ndarray, values: np.ndarray) -> float:
+    """A gradient's typical swing inside a calendar quarter (K), its sigma in the normalized form.
+
+    The root mean square of each value's difference from its quarter's mean,
+    with one degree of freedom taken out per quarter; NaN values are skipped.
+    One row per matched source, as for the coefficients.
+
+    >>> within_quarter_sigma(np.array([0, 0, 1, 1]), np.array([1.0, 3.0, 10.0, 14.0]))
+    2.23606797749979
+    """
+    values = np.asarray(values, float)
+    usable = np.isfinite(values)
+    _, group = np.unique(np.asarray(quarters)[usable], return_inverse=True)
+    counts = np.bincount(group)
+    deviations = (
+        values[usable] - (np.bincount(group, weights=values[usable]) / counts)[group]
+    )
+    degrees = int(usable.sum()) - len(counts)
+    if degrees <= 0:
+        raise ValueError("too few values for a within-quarter sigma")
+    return float(np.sqrt(np.sum(deviations**2) / degrees))
+
+
 def solve(
     calibration: Table, last_complete_quarter: int, lagging_from: int | None
 ) -> tuple[dict, dict, Table]:
@@ -241,7 +385,7 @@ def solve(
     The coefficients and sigmas use every source with both gradients; the
     references use one value per observation (its sources share its gradients).
     ``last_complete_quarter`` and ``lagging_from`` are as for
-    ``gradient_term.quarter_references``.
+    ``quarter_references()``.
     """
     quarters = quarter_index(np.asarray(calibration["date"]).astype(str))
     gradients = {name: np.asarray(calibration[name], float) for name in GRADIENT_MSIDS}

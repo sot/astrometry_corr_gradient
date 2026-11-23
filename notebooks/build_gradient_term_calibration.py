@@ -21,16 +21,19 @@ From an astromon database to the gradient term's numbers. The code is in
 `astrometry_corr_gradient/calibration.py`, one function per step:
 
 1. **Matched sources:** the X-ray to catalog cross matches, rebased onto each
-   detector's latest CALALIGN matrix, with the calibration's cuts.
-2. **Dwells:** each observation's dwell, from kadi's maneuvers.
+   detector's latest CALALIGN matrix. Cuts: astromon's match cuts, the
+   calibration catalogs, a few excluded targets and observations, SIM-Z within
+   4 mm of nominal, and 2004 on.
+2. **Dwells:** each observation's dwell, from the end of its maneuver to the
+   start of the next, from kadi.
 3. **Calibration set:** one row per source, with OOBAGRD3 and OOBAGRD6
    averaged over each dwell.
 4. **Solve:** the coefficients, sigmas and reference table.
 
-The only setting is `DATABASE`, the astromon database (only read). The
-CALALIGN matrices are this repo's copy. The telemetry comes from cheta and
-the safing intervals from kadi and cheta, both cached in `cache/` so a rerun
-fetches only what is new.
+The only setting is `DATABASE`, the astromon database, which is read and never
+written. The CALALIGN matrices are this repo's copy. The telemetry comes from
+cheta, with telemetry in safing intervals (from kadi and cheta) masked. Both
+are cached in `cache/`, so a rerun fetches only what is new.
 
 The calibration set is saved as `gradient_term_calibration_set.ecsv`;
 `python scripts/update_gradient_term_data.py` then writes the numbers into
@@ -111,16 +114,16 @@ print(
     f" {calibration_table['date'][0][:10]} to {calibration_table['date'][-1][:10]}"
 )
 print(
-    {
-        detector: int((calibration_table["detector"] == detector).sum())
+    ", ".join(
+        f"{detector} {int((calibration_table['detector'] == detector).sum()):,}"
         for detector in np.unique(calibration_table["detector"])
-    }
+    )
 )
 calibration_table[:5].pprint(max_width=-1)
 """
 
 markdown_previous = """\
-## Check: against the previous calibration set
+## 3a. Check against the previous calibration set
 
 The calibration set saved last time, if there is one: which sources came or
 went, and whether the common ones changed. A new database adds sources; the
@@ -140,7 +143,7 @@ if CALIBRATION_PATH.exists():
 
     new_keys, old_keys = keys(calibration_table), keys(previous)
     print(
-        f"only now: {len(set(new_keys) - set(old_keys))}, only before: {len(set(old_keys) - set(new_keys))}"
+        f"new: {len(set(new_keys) - set(old_keys))}, gone: {len(set(old_keys) - set(new_keys))}"
     )
     position = {key: index for index, key in enumerate(old_keys)}
     common = [
@@ -168,7 +171,7 @@ else:
 """
 
 markdown_save = """\
-## Saved
+## 3b. Save
 
 The calibration set, with where it came from in its header.
 """
@@ -211,10 +214,11 @@ print(
 markdown_solve = """\
 ## 4. Solve, and compare with the module
 
-The coefficients and sigmas from every source with both gradients; the
-reference table from one value per observation. History uses each quarter's
-own medians; from the release quarter on, the previous quarter's. The quarter
-now filling sets no reference yet.
+The coefficients and sigmas use every source with both gradients. The
+reference table uses one value per observation, since an observation's
+sources share its gradients. History uses each quarter's own medians; from the
+release quarter on, the previous quarter's. The quarter still filling uses the
+previous quarter's too.
 """
 
 code_solve = r"""
@@ -263,7 +267,8 @@ markdown_notes = """\
 ## Notes
 
 - **To make new numbers:** point `DATABASE` at a newer database and rerun,
-  then `python scripts/update_gradient_term_data.py`.
+  then `python scripts/update_gradient_term_data.py` and
+  `python scripts/make_mock_n0011.py`.
 - **A new CALALIGN file:** `python scripts/update_calalign_table.py
   /path/to/calalign` rewrites the repo's copy of the matrices.
 - **Not here yet:** averaging the gradients over each observation's GTI span

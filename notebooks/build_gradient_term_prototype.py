@@ -3,9 +3,9 @@
 Run this script to (re)build the notebook from scratch; the notebook itself
 is what gets committed and opened, this script is just how it's produced.
 The gradient term's code and data live in astrometry_corr_gradient/gradient_term.py; the
-notebook imports it, prints it to review, and shows the coefficients, the
-reference table and the test vectors. gradient_term_validation.ipynb checks
-the residuals with it.
+notebook says what to implement, shows the coefficients, the reference table
+and the test vectors, then prints the file. gradient_term_validation.ipynb
+checks the residuals with it.
 """
 
 from pathlib import Path
@@ -15,22 +15,39 @@ import nbformat as nbf
 HERE = Path(__file__).parent
 
 markdown_intro = """\
-# Gradient term: prototype for the developers
+# Gradient term: prototype
 
 The gradient term corrects each observation's dz and dy for the periscope
-gradients OOBAGRD3 and OOBAGRD6. It goes on top of the CALALIGN values.
+gradients OOBAGRD3 and OOBAGRD6. CALALIGN is unchanged; the term goes on top
+of it.
 
-All of it is in one file, `astrometry_corr_gradient/gradient_term.py`: the code, the numbers
-and the test vectors. It needs only numpy and astropy.
+Everything is in one file, `astrometry_corr_gradient/gradient_term.py`: the
+code, the numbers and the test vectors. It needs only numpy and astropy.
 
-This notebook prints that file, then shows:
+**What to implement**, for each observation, on dz and dy:
 
-1. the coefficients,
-2. the reference table,
-3. the test vectors.
+`term = c3 * (OOBAGRD3 - ref3) + c6 * (OOBAGRD6 - ref6)`
 
-`gradient_term_validation.ipynb` checks that the term works. After a new
-export, `python scripts/update_gradient_term_data.py` remakes the numbers.
+1. **Gradients:** the observation's mean OOBAGRD3 and OOBAGRD6, in K, over its
+   dwell (from the end of its maneuver to the start of the next), with
+   telemetry in safing intervals masked.
+2. **Coefficients:** c3 and c6 for the axis, below.
+3. **References:** ref3 and ref6, from the reference table's row for the
+   calendar quarter (UTC) of the observation's start time (DATE-OBS).
+4. **Result:** the term in arcsec, the expected X-ray minus catalog offset. The
+   corrected offset is the observed one minus the term.
+5. **No term** if a gradient is missing or the quarter has no row: the term is
+   0 and the observation is flagged.
+6. **Check:** match the test vectors below.
+
+**Still open:**
+
+- How the term enters processing: which positions or alignment it corrects,
+  and with which sign there.
+- The averaging window: the dwell, as here, or the observation's GTI span.
+
+Below: the coefficients, the reference table, the test vectors, then the whole
+file. `gradient_term_validation.ipynb` shows that the term works.
 """
 
 code_setup = r"""
@@ -47,9 +64,11 @@ from astrometry_corr_gradient import gradient_term
 """
 
 markdown_module = """\
-## The module
+## The whole file
 
-The whole file. Its docstring, at the top, explains the term.
+`astrometry_corr_gradient/gradient_term.py`. Its docstring, at the top, says
+what to implement; the numbers are at the end. After a new calibration set,
+`python scripts/update_gradient_term_data.py` rewrites them.
 """
 
 code_module = r"""
@@ -61,9 +80,10 @@ markdown_coefficients = """\
 
 Two ways to write the same term:
 
-- **Per K:** `term = c3 * (OOBAGRD3 - ref) + c6 * (OOBAGRD6 - ref)`
-- **Per sigma:** `term = k3 * (OOBAGRD3 - ref) / s3 + k6 * (OOBAGRD6 - ref) / s6`
+- **Per K:** `term = c3 * (OOBAGRD3 - ref3) + c6 * (OOBAGRD6 - ref6)`
+- **Per sigma:** `term = k3 * (OOBAGRD3 - ref3) / s3 + k6 * (OOBAGRD6 - ref6) / s6`
 
+**ref3** and **ref6** are the quarter's references, from the table below.
 **s** is how much each gradient typically moves inside a quarter. **k** = c x s
 is the arcsec for that typical move, so the two gradients compare directly.
 """
@@ -93,9 +113,9 @@ markdown_references = """\
 ## Reference table
 
 One row per calendar quarter. Observations in that quarter use its OOBAGRD3
-and OOBAGRD6, in K. `gradient_term()` only looks up the row; how the row was
-made does not matter to it. `from_quarter` and `observations` say where each
-row's medians come from.
+and OOBAGRD6, in K, as ref3 and ref6. `gradient_term()` only looks up the row;
+how the row was made does not matter to it. `from_quarter` is the quarter
+whose observations made the row; `observations` is how many.
 """
 
 code_references = r"""
@@ -125,14 +145,14 @@ nb = nbf.v4.new_notebook()
 nb.cells = [
     nbf.v4.new_markdown_cell(markdown_intro),
     nbf.v4.new_code_cell(code_setup.strip("\n")),
-    nbf.v4.new_markdown_cell(markdown_module),
-    nbf.v4.new_code_cell(code_module.strip("\n")),
     nbf.v4.new_markdown_cell(markdown_coefficients),
     nbf.v4.new_code_cell(code_coefficients.strip("\n")),
     nbf.v4.new_markdown_cell(markdown_references),
     nbf.v4.new_code_cell(code_references.strip("\n")),
     nbf.v4.new_markdown_cell(markdown_vectors),
     nbf.v4.new_code_cell(code_vectors.strip("\n")),
+    nbf.v4.new_markdown_cell(markdown_module),
+    nbf.v4.new_code_cell(code_module.strip("\n")),
 ]
 
 out_path = HERE / "gradient_term_prototype.ipynb"

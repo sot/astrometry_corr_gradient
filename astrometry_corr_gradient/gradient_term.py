@@ -1,41 +1,55 @@
-"""The gradient term: a prototype of what processing needs, for the developers.
+"""The gradient term: what processing needs.
 
-The gradient term corrects each observation's position for the periscope
-gradient monitors OOBAGRD3 and OOBAGRD6. It goes on top of the CALALIGN
-alignment, which is made as today, without the term. For each observation, on
-each axis (dz and dy)::
+The gradient term corrects each observation's dz and dy for the periscope
+gradients OOBAGRD3 and OOBAGRD6. CALALIGN is unchanged; the term goes on top
+of it.
 
-    term = c3 * (OOBAGRD3 - OOBAGRD3 reference) + c6 * (OOBAGRD6 - OOBAGRD6 reference)
+What to implement, for each observation, on each axis (dz and dy)::
 
-The term is the expected X-ray minus catalog offset, in arcsec. Subtract it
-from the X-ray position's dz and dy.
+    term = c3 * (OOBAGRD3 - ref3) + c6 * (OOBAGRD6 - ref6)
+
+- OOBAGRD3, OOBAGRD6: the observation's mean of each gradient, in K, over its
+  dwell (from the end of its maneuver to the start of the next), with
+  telemetry in safing intervals masked. We average cheta's 5-minute means.
+- c3, c6: ``COEFFICIENTS``, arcsec per K. One pair per axis for the whole
+  mission.
+- ref3, ref6: the row of ``reference_table()`` for the calendar quarter (UTC)
+  of the observation's start time (DATE-OBS).
+- The term is in arcsec: the expected X-ray minus catalog offset. The
+  corrected offset is the observed one minus the term.
+- No term if a gradient is missing or the table has no row for the quarter:
+  the term is 0 and the observation is flagged.
+- Check an implementation against ``vector_table()``, the test vectors.
 
 The same term, normalized::
 
-    term = k3 * (OOBAGRD3 - OOBAGRD3 reference) / s3 + k6 * (OOBAGRD6 - OOBAGRD6 reference) / s6
+    term = k3 * (OOBAGRD3 - ref3) / s3 + k6 * (OOBAGRD6 - ref6) / s6
 
-- c3, c6: ``COEFFICIENTS``, arcsec per K. Fixed.
 - s3, s6: ``SIGMAS``, how much each gradient typically moves inside a calendar
   quarter, in K.
-- k3, k6: ``coefficients_per_sigma()``, c x s. Arcsec for that typical move,
-  so the two gradients compare directly.
-- The references: ``reference_table()``, one pair per calendar quarter.
-  Observations in a quarter use its row. How the rows are made does not
-  matter here; ``quarter_references()`` makes them.
-- OOBAGRD3, OOBAGRD6: the observation's mean over its dwell, from the end of
-  its maneuver to the start of the next, with bad telemetry masked.
-- No term if a gradient is missing, or the table has no row for the quarter.
-  The observation gets the CALALIGN value alone, and a flag.
-- Units: K. The same numbers in degC. Divide degF by 1.8.
+- k3, k6: ``coefficients_per_sigma()``, c x s: the arcsec for that typical
+  move, so the two gradients compare directly.
 
-Needs only numpy and astropy. The data at the end of this file is written by
-``scripts/update_gradient_term_data.py``. Don't edit it by hand.
+Still open:
+
+- How the term enters processing: which positions or alignment it corrects,
+  and with which sign there.
+- The averaging window: the dwell, as here, or the observation's GTI span.
+
+Units are K. The gradients are temperature differences, so degC gives the same
+numbers; divide a degF difference by 1.8.
+
+Needs only numpy and astropy. The numbers at the end of this file are written
+by ``scripts/update_gradient_term_data.py``; don't edit them by hand.
 
 Examples
 --------
->>> term = gradient_term("2025:200:12:00:00", {"OOBAGRD3": -0.31, "OOBAGRD6": 0.141})
->>> sorted(term)
-['dy', 'dz', 'no_reference', 'no_telemetry']
+The first test vector:
+
+>>> first = vector_table()[0]
+>>> term = gradient_term(first["date"], {name: first[name] for name in GRADIENT_MSIDS})
+>>> bool(abs(term["dz"][0] - first["dz"]) < 1e-4 and abs(term["dy"][0] - first["dy"]) < 1e-4)
+True
 """
 
 import numpy as np
@@ -44,7 +58,6 @@ from astropy.time import Time
 
 AXES = ("dz", "dy")
 GRADIENT_MSIDS = ("OOBAGRD3", "OOBAGRD6")
-MIN_OBSERVATIONS = 10  # a quarter needs this many observations to set a reference
 
 
 def quarter_index(times) -> np.ndarray:
@@ -63,16 +76,6 @@ def quarter_index(times) -> np.ndarray:
     years = np.atleast_1d(calendar["year"]).astype(int)
     months = np.atleast_1d(calendar["month"]).astype(int)
     return years * 4 + (months - 1) // 3
-
-
-def quarter_label(index: int) -> str:
-    """2024Q3 for the quarter that starts on 2024-07-01."""
-    return f"{index // 4}Q{index % 4 + 1}"
-
-
-def quarter_start(index: int) -> str:
-    """The quarter's first day, e.g. 2024-07-01."""
-    return f"{index // 4}-{3 * (index % 4) + 1:02d}-01"
 
 
 def label_index(label: str) -> int:
@@ -164,138 +167,6 @@ def gradient_term(
     }
 
 
-def quarter_references(
-    quarters: np.ndarray,
-    gradients: dict,
-    last_complete_quarter: int,
-    *,
-    lagging_from: int | None,
-    min_observations: int = MIN_OBSERVATIONS,
-) -> Table:
-    """Make the reference table: one row per quarter Q, the OOBAGRD3 and OOBAGRD6 that observations in Q use.
-
-    History, before ``lagging_from``, uses each quarter's own medians. From
-    ``lagging_from`` (the release) on, a quarter uses the previous quarter's
-    medians, and they never change. The quarter still filling always uses the
-    previous one, having no medians of its own yet. Make the CALALIGN values
-    the same way: the CALALIGN median and the reference come from the same
-    quarter. Run it when a quarter ends, to add the next row.
-
-    Parameters
-    ----------
-    quarters : numpy.ndarray
-        Each observation's ``quarter_index()``; one value per observation, not per source.
-    gradients : dict
-        OOBAGRD3 and OOBAGRD6 per observation (K).
-    last_complete_quarter : int
-        The latest quarter that has ended; later observations set no reference.
-    lagging_from : int or None
-        The first quarter that lags (the release); None: none does, apart from
-        the quarter still filling.
-    min_observations : int
-        A quarter needs this many observations with both gradients; with fewer,
-        the latest earlier quarter that has enough is used.
-
-    Returns
-    -------
-    astropy.table.Table
-        From the first quarter that has a reference through the quarter after
-        ``last_complete_quarter`` (the one now filling): its label and first
-        day, the quarter the reference comes from, the number of observations
-        behind it, and each gradient's median over them.
-
-    Raises
-    ------
-    ValueError
-        If no complete quarter has enough observations.
-    """
-    columns = {name: np.asarray(gradients[name], float) for name in GRADIENT_MSIDS}
-    usable = np.all([np.isfinite(column) for column in columns.values()], axis=0)
-    medians, counts = {}, {}
-    for index in np.unique(quarters[usable]):
-        rows = usable & (quarters == index)
-        if index <= last_complete_quarter and rows.sum() >= min_observations:
-            medians[int(index)] = {
-                name: float(np.median(column[rows])) for name, column in columns.items()
-            }
-            counts[int(index)] = int(rows.sum())
-    if not medians:
-        raise ValueError(
-            f"no complete quarter has {min_observations} observations with both gradients"
-        )
-    sources = np.array(sorted(medians))
-    table_rows = []
-    for index in range(int(sources[0]), last_complete_quarter + 2):
-        own = lagging_from is None or index < lagging_from
-        candidates = sources[sources <= index] if own else sources[sources < index]
-        if candidates.size == 0:
-            continue  # a lagging first quarter has nothing before it
-        source = int(candidates.max())
-        table_rows.append(
-            {
-                "quarter": quarter_label(index),
-                "start": quarter_start(index),
-                "from_quarter": quarter_label(source),
-                "observations": counts[source],
-            }
-            | medians[source]
-        )
-    return Table(rows=table_rows)
-
-
-def fit_coefficients(
-    quarters: np.ndarray, offset: np.ndarray, gradients: dict
-) -> dict[str, float]:
-    """One axis's coefficients (arcsec per K), fit within calendar quarters. Done once; not part of processing.
-
-    One row per matched source. Each quarter's mean is taken out of the offset
-    and of both gradients, then one least-squares fit with no intercept, so the
-    coefficients follow how the offset moves with the gradients inside a
-    quarter, not their slow drift over the years.
-    """
-    columns = [np.asarray(gradients[name], float) for name in GRADIENT_MSIDS]
-    usable = np.isfinite(offset) & np.all(
-        [np.isfinite(column) for column in columns], axis=0
-    )
-    _, group = np.unique(quarters[usable], return_inverse=True)
-    counts = np.bincount(group)
-
-    def within_quarter(values: np.ndarray) -> np.ndarray:
-        return (
-            values[usable]
-            - (np.bincount(group, weights=values[usable]) / counts)[group]
-        )
-
-    design = np.column_stack([within_quarter(column) for column in columns])
-    fitted = np.linalg.lstsq(
-        design, within_quarter(np.asarray(offset, float)), rcond=None
-    )[0]
-    return dict(zip(GRADIENT_MSIDS, (float(k) for k in fitted), strict=True))
-
-
-def within_quarter_sigma(quarters: np.ndarray, values: np.ndarray) -> float:
-    """A gradient's typical swing inside a calendar quarter (K), its sigma in the normalized form.
-
-    The root mean square of each value's difference from its quarter's mean,
-    with one degree of freedom taken out per quarter; NaN values are skipped.
-    One row per matched source, as for the coefficients.
-
-    >>> within_quarter_sigma(np.array([0, 0, 1, 1]), np.array([1.0, 3.0, 10.0, 14.0]))
-    2.23606797749979
-    """
-    values = np.asarray(values, float)
-    usable = np.isfinite(values)
-    _, group = np.unique(np.asarray(quarters)[usable], return_inverse=True)
-    counts = np.bincount(group)
-    deviations = (
-        values[usable] - (np.bincount(group, weights=values[usable]) / counts)[group]
-    )
-    degrees = int(usable.sum()) - len(counts)
-    if degrees <= 0:
-        raise ValueError("too few values for a within-quarter sigma")
-    return float(np.sqrt(np.sum(deviations**2) / degrees))
-
-
 def coefficients_per_sigma(
     coefficients: dict | None = None, sigmas: dict | None = None
 ) -> dict[str, dict[str, float]]:
@@ -312,7 +183,7 @@ def coefficients_per_sigma(
 
 
 # ---- the data: written by scripts/update_gradient_term_data.py, not by hand ----
-# from gradient_term_calibration_set.ecsv, made 2026-11-23 02:33 UTC, astromon database astromon_gaussian_redo_20261122_2132.h5
+# from gradient_term_calibration_set.ecsv, made 2026-11-23 03:35 UTC, astromon database astromon_gaussian_redo_20261122_2132.h5
 
 COEFFICIENTS = {  # arcsec per K of each gradient
     "dz": {"OOBAGRD3": 0.475, "OOBAGRD6": -13.581},

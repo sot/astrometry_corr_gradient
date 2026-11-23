@@ -24,9 +24,10 @@ the matched sources in `gradient_term_calibration_set.ecsv`, which
 
 **The plan**
 
-- **History:** each quarter is corrected with its own values.
-- **From the 2026 release:** each new quarter uses the previous quarter's
-  values. They never change.
+- **History:** each quarter is corrected with its own CALALIGN value and its
+  own reference.
+- **From the 2026 release:** each new quarter uses the previous quarter's.
+  Once set, they are not revised.
 - **Both parts follow this rule:** the CALALIGN value and the term's
   reference come from the same quarter.
 
@@ -37,28 +38,33 @@ quarter's values everywhere.
 
 - **Before 2021-07-02:** today's CALDB.
 - **From 2021-07-02:** the mock N0011 matrices,
-  `astrometry_corr_gradient/data/calalign_mock_n0011.ecsv`. One per quarter and
-  detector, made the old way: each quarter's median offset, without the term,
-  plus one constant per detector. They go through the same matrix code as the
-  shipped CALALIGN files.
+  `astrometry_corr_gradient/data/calalign_mock_n0011.ecsv`, one per quarter
+  and detector. They are made the old way: each quarter's median offset,
+  without the term, with one constant per detector on top. They go through the
+  same matrix code as the shipped CALALIGN files.
 - **In-sample, like today's CALDB:** a quarter's matrix is made from all of its
-  sources, the scored ones included.
+  sources, including the ones it is tested on.
+
+**How it is scored**
+
+dr is the offset on the sky, from dz and dy together. r68 and r90 are the
+radii that hold 68% and 90% of the sources, in arcsec. For dz and dy alone,
+the tables give the same percentiles of |dz| and |dy|.
 
 **What it shows**
 
 - **The module's numbers** come back exactly from the calibration set.
-- **The mock N0011 matrices work.** Before 2021-07-02 nothing changes; after
-  it, each quarter's median is at zero, as intended.
+- **The mock N0011 matrices work.** Before 2021-07-02 they leave today's CALDB
+  as is. From 2021Q4 on, each quarter's median is at zero, as intended.
+  2021Q3's dz median is 0.005": two of its sources are on 2021-07-01, before
+  the first mock matrix, so they keep today's CALDB.
 - **The term helps in every period.** dr r68 / r90 drops from 0.353" / 0.586"
   to 0.290" / 0.480" before 2021-07-02, and from 0.585" / 0.861" to 0.385" /
   0.621" since.
 - **The plan beats lagging throughout since 2021-07-02**, by 0.049" in r68 and
   0.079" in r90. Before 2021-07-02 they tie.
-- **The biggest difference is Safe Mode #10, in late 2022.** Lagging spikes
-  there; the plan doesn't.
-
-dr is the offset on the sky. r68 and r90 are the radii that hold 68% and 90%
-of the sources, in arcsec. For dz and dy alone they are p68 and p90.
+- **The biggest difference between the plan and lagging is Safe Mode #10, in
+  late 2022.** Lagging spikes there; the plan doesn't.
 """
 
 code_setup = r"""
@@ -79,7 +85,7 @@ from update_gradient_term_data import (
     handoff_data,
 )
 
-from astrometry_corr_gradient import gradient_term
+from astrometry_corr_gradient import calibration, gradient_term
 from astrometry_corr_gradient.calalign import (
     calalign_table,
     current_caldb_matrices,
@@ -183,8 +189,8 @@ assert list(saved["detector"]) == list(fresh["detector"])
 for axis_name in AXES:
     assert np.allclose(saved[axis_name], fresh[axis_name], rtol=0, atol=1e-9)
 mocks = {
-    "within chunk": saved,
-    "lagging": mock_matrices(
+    "plan": saved,
+    "lagging throughout": mock_matrices(
         inputs, last_complete_quarter=last_complete, lagging_from=int(quarters.min())
     ),
 }
@@ -212,7 +218,7 @@ levels = quarter_levels(
 )
 constants = detector_constants(inputs, levels)
 for axis_name in AXES:
-    added_back = calaligns["within chunk"][axis_name] + np.array(
+    added_back = calaligns["plan"][axis_name] + np.array(
         [constants[axis_name][detector] for detector in detectors]
     )
     medians = {
@@ -228,18 +234,18 @@ for axis_name in AXES:
     )
     print(
         f"{axis_name}: each quarter's median is 0 from"
-        f" {gradient_term.quarter_label(first_mock_quarter + 1)};"
-        f" {gradient_term.quarter_label(first_mock_quarter)}'s is"
+        f" {calibration.quarter_label(first_mock_quarter + 1)};"
+        f" {calibration.quarter_label(first_mock_quarter)}'s is"
         f" {medians[first_mock_quarter]:+.3f} arcsec"
     )
 early = int(np.sum((quarters == first_mock_quarter) & before))
 print(
-    f"({gradient_term.quarter_label(first_mock_quarter)} has {early} sources from before"
+    f"({calibration.quarter_label(first_mock_quarter)} has {early} sources from before"
     " 2021-07-02, which keep today's CALDB)"
 )
 
 _, first_rows = np.unique(np.asarray(inputs["obsid"]), return_index=True)
-lagging_table = gradient_term.quarter_references(
+lagging_table = calibration.quarter_references(
     quarters[first_rows],
     {name: column[first_rows] for name, column in gradients.items()},
     last_complete_quarter=last_complete,
@@ -248,13 +254,13 @@ lagging_table = gradient_term.quarter_references(
 for name in gradient_term.GRADIENT_MSIDS:
     lagging_table[name] = np.round(lagging_table[name], 5)
 terms = {
-    "within chunk": gradient_term.gradient_term(dates, gradients),
-    "lagging": gradient_term.gradient_term(
+    "plan": gradient_term.gradient_term(dates, gradients),
+    "lagging throughout": gradient_term.gradient_term(
         dates, gradients, lagging_table, gradient_term.COEFFICIENTS
     ),
 }
 VERSIONS = {}
-for scheme in ("within chunk", "lagging"):
+for scheme in ("plan", "lagging throughout"):
     VERSIONS[f"{scheme}: CALALIGN alone"] = calaligns[scheme]
     VERSIONS[f"{scheme}: CALALIGN + term"] = {
         axis_name: calaligns[scheme][axis_name] - terms[scheme][axis_name]
@@ -267,7 +273,7 @@ scored = np.logical_and.reduce(
     + [~term["no_reference"] for term in terms.values()]
 )
 print(
-    f"{int(scored.sum()):,} sources, {int((scored & ~terms['within chunk']['no_telemetry']).sum()):,} with the term"
+    f"{int(scored.sum()):,} sources, {int((scored & ~terms['plan']['no_telemetry']).sum()):,} with the term"
 )
 
 
@@ -306,13 +312,13 @@ def score_rows(axis_names: tuple[str, ...], names: list[str]) -> Table:
     return Table(rows=rows)
 
 
-print("dr: 68% / 90% of |offset| (arcsec)")
+print("dr: r68 / r90 (arcsec)")
 score_rows(("dr",), list(VERSIONS)).pprint(max_width=-1)
 print()
-print("dz and dy, within chunk: 68% / 90% of |offset| (arcsec)")
-score_rows(
-    ("dz", "dy"), ["within chunk: CALALIGN alone", "within chunk: CALALIGN + term"]
-).pprint(max_width=-1)
+print("dz and dy, plan: 68th / 90th percentiles of |dz| and |dy| (arcsec)")
+score_rows(("dz", "dy"), ["plan: CALALIGN alone", "plan: CALALIGN + term"]).pprint(
+    max_width=-1
+)
 print()
 
 
@@ -334,14 +340,15 @@ def versus(name: str, reference: str) -> None:
         print(f"    {window}: " + "; ".join(verdicts))
 
 
-versus("within chunk: CALALIGN + term", "within chunk: CALALIGN alone")
-versus("within chunk: CALALIGN + term", "lagging: CALALIGN + term")
+versus("plan: CALALIGN + term", "plan: CALALIGN alone")
+versus("plan: CALALIGN + term", "lagging throughout: CALALIGN + term")
 '''
 
 markdown_time = """\
 ## 3. Over time
 
-dr r68 and r90 in 90-day windows.
+dr r68 and r90 in 90-day windows. The vertical line is 2021-07-02; the dashed
+line is the specification, 90% within 1.0".
 """
 
 code_time = r"""
@@ -360,9 +367,9 @@ def running(values: np.ndarray, q: float) -> np.ndarray:
 
 
 STYLES = {
-    "within chunk: CALALIGN alone": ("0.35", 2.0, "-"),
-    "within chunk: CALALIGN + term": ("#1baf7a", 2.4, "-"),
-    "lagging: CALALIGN + term": ("0.05", 1.3, (0, (1, 2))),
+    "plan: CALALIGN alone": ("0.35", 2.0, "-"),
+    "plan: CALALIGN + term": ("#1baf7a", 2.4, "-"),
+    "lagging throughout: CALALIGN + term": ("0.05", 1.3, (0, (1, 2))),
 }
 plt.rcParams.update({"font.size": 13})
 figure, axes = plt.subplots(2, 1, figsize=(14, 8.5), sharex=True)
@@ -411,11 +418,13 @@ markdown_notes = """\
 
 - **In-sample:** the coefficients were fit on these same sources, and the mock
   N0011 matrices were made from them.
-- **Leaving each source out of its own quarter's median** (the old stand-in
-  did this, with the sources linked to it) puts the plan since 2021-07-02 at
-  0.401" / 0.645" with the term: 0.016" / 0.024" higher. Lagging doesn't
-  change. The plan then beats lagging by 0.032" in r68; r90 is a tie.
-- **2026Q4** was still filling at the export, so it lags in both schemes.
+- **A fairer test:** leave each source out of its own quarter's median, along
+  with the sources that share an observation or a catalog counterpart with it.
+  The plan since 2021-07-02 is then 0.401" / 0.645" with the term, 0.016" /
+  0.024" higher. Lagging throughout doesn't change. The plan still beats it in
+  r68, by 0.032"; r90 is a tie.
+- **2026Q4** was still filling when the calibration set was made, so it lags
+  in both.
 - **The 2017-09 spike** is five M30 sources about 2.5" off, with or without
   the term.
 """
