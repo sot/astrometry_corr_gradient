@@ -45,6 +45,9 @@ code, the numbers and the test vectors. It needs only numpy and astropy.
 - How the term enters processing: which positions or alignment it corrects,
   and with which sign there.
 - The averaging window: the dwell, as here, or the observation's GTI span.
+- The reference table starts at 2004Q1 for now, so observations before 2004
+  get no term. Rows back to 2000Q1 will be added; there is no gradient
+  telemetry before 2000.
 
 Below: the coefficients, the reference table, the test vectors, then the whole
 file. `gradient_term_validation.ipynb` shows that the term works.
@@ -115,7 +118,8 @@ markdown_references = """\
 One row per calendar quarter. Observations in that quarter use its OOBAGRD3
 and OOBAGRD6, in K, as ref3 and ref6. `gradient_term()` only looks up the row;
 how the row was made does not matter to it. `from_quarter` is the quarter
-whose observations made the row; `observations` is how many.
+whose observations made the row; `observations` is how many. For now the
+table starts at 2004Q1.
 """
 
 code_references = r"""

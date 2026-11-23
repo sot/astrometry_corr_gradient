@@ -35,6 +35,9 @@ Still open:
 - How the term enters processing: which positions or alignment it corrects,
   and with which sign there.
 - The averaging window: the dwell, as here, or the observation's GTI span.
+- The reference table starts at 2004Q1 for now, so observations before 2004
+  get no term. Rows back to 2000Q1 will be added; there is no gradient
+  telemetry before 2000.
 
 Units are K. The gradients are temperature differences, so degC gives the same
 numbers; divide a degF difference by 1.8.

@@ -271,8 +271,14 @@ markdown_notes = """\
   `python scripts/make_mock_n0011.py`.
 - **A new CALALIGN file:** `python scripts/update_calalign_table.py
   /path/to/calalign` rewrites the repo's copy of the matrices.
-- **Not here yet:** averaging the gradients over each observation's GTI span
-  instead of its dwell.
+- **Not here yet:**
+  - averaging the gradients over each observation's GTI span instead of its
+    dwell;
+  - references back to 2000Q1. The data are there (about 1,080 matched
+    sources in 2000-2003; cheta's OOBAGRD3 and OOBAGRD6 start on
+    1999-12-31), but it needs `START` moved to 2000 and the references
+    started separately from the fit. There is no gradient telemetry for
+    1999.
 """
 
 nb = nbf.v4.new_notebook()
