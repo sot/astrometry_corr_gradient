@@ -35,8 +35,29 @@ quarter.
   folder of CALALIGN files, when a new one ships.
 - `scripts/make_mock_n0011.py`: rewrites the mock N0011 file from the
   calibration set.
+- `astrometry_corr_gradient/fid_shift.py`, `scripts/shift_fids.py` and
+  `scripts/compare_asol.py`: the term applied to the fid centroids, for a
+  test in the aspect pipeline (below).
 - `notebooks/`: the calibration, the prototype for the developers, and the
   residual check. Each notebook is built by its `build_*.py` script.
+
+## Testing the term in the aspect pipeline
+
+The term goes where `aca_corr_fid` applies the periscope correction: one
+constant shift of every good fid centroid (`ang_y_sm`, `ang_z_sm` in ACACENT)
+per observation.
+
+`shift_fids.py` needs only Python 3.11+, numpy and astropy; `compare_asol.py`
+also needs Ska's Quaternion package.
+
+1. Run the aspect pipeline through `aca_corr_fid` and stop.
+2. `python scripts/shift_fids.py ACACENT FIDPROPS OBCFILE... --in-place`
+   (the FIDPROPS and OBC files given to `aca_corr_fid`; `@list` works). Check
+   the means it logs against `aca_corr_fid`'s verbose "Mean Gradient 3/6".
+3. Run the rest of the pipeline.
+4. `python scripts/compare_asol.py ASOL_WITHOUT ASOL_WITH --acacent ACACENT`:
+   1.0 on each axis means the new aspect solution moves X-ray events by minus
+   the term, as intended.
 
 ## Making new numbers
 

@@ -12,7 +12,7 @@ dependencies = ["numpy", "astropy"]
 [project.optional-dependencies]
 # the calibration (crossmatch, calalign, telemetry, calibration): the Ska environment's packages
 calibration = ["h5py", "cxotime", "kadi", "cheta"]
-# scripts/update_calalign_table.py only
+# scripts/update_calalign_table.py and scripts/compare_asol.py only
 calalign = ["Quaternion"]
 test = ["pytest"]
 
