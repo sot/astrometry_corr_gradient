@@ -66,6 +66,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from astropy.io import fits
 from astropy.table import Table
 from IPython.display import Markdown, display
 
@@ -247,7 +248,7 @@ def gradient_term_fid_correction(
         & (acacent["alg"] == kalman_alg)
     )
     if not usable.any():
-        return acacent, {"applied": False, "reason": "no normal fid centroids"}
+        return acacent, {"applied": False, "status": "NOFIDS"}
     tmin = float(acacent["time"][usable].min())
     tmax = float(acacent["time"][usable].max())
 
@@ -263,7 +264,7 @@ def gradient_term_fid_correction(
         values = np.asarray(obc[name][in_range], float)
         good = np.asarray(obc[f"{name}_GOOD"][in_range], bool)
         if not good.any():  # aca_corr_fid turns the periscope correction off too
-            return acacent, {"applied": False, "reason": f"no good {name} samples"}
+            return acacent, {"applied": False, "status": "NOTELEM"}
         index = np.arange(len(values))
         means[name] = float(np.mean(np.interp(index, index[good], values[good])))
 
@@ -272,9 +273,14 @@ def gradient_term_fid_correction(
     #    calendar quarter (UTC).
     shift = gradient_term.fid_centroid_shift(date_obs, means)
     if shift["no_reference"][0]:  # warn, and leave the centroids as they are
-        return acacent, {"applied": False, "reason": f"no reference row for {date_obs}"}
+        return acacent, {"applied": False, "status": "NOREF", "means": means}
     shift_y_deg = float(shift["ang_y_sm"][0])
     shift_z_deg = float(shift["ang_z_sm"][0])
+    quarter = int(gradient_term.quarter_index(date_obs)[0])
+    table = gradient_term.reference_table()
+    row = table[
+        [gradient_term.label_index(label) == quarter for label in table["quarter"]]
+    ][0]
 
     # 4. NEW: subtract it from every row of every good fid slot, whatever its
     #    algorithm or status (as the other two corrections do), after the
@@ -292,15 +298,14 @@ def gradient_term_fid_correction(
     corrected["ang_y_sm"][:] = new_y
     corrected["ang_z_sm"][:] = new_z
 
-    # 5. NEW, suggested: record it in the ACACENT header, as
-    #    scripts/shift_fids.py does: GTRM_DY and GTRM_DZ (arcsec), GTRM_QTR,
-    #    and a HISTORY line.
-    quarter = int(gradient_term.quarter_index(date_obs)[0])
+    # 5. NEW, suggested: record what was done in the headers (below).
     return corrected, {
         "applied": True,
+        "status": "APPLIED",
         "tmin": tmin,
         "tmax": tmax,
         "means": means,
+        "references": {name: float(row[name]) for name in gradient_term.GRADIENT_MSIDS},
         "quarter": f"{quarter // 4}Q{quarter % 4 + 1}",
         "term_dy": shift_y_deg * 3600,
         "term_dz": shift_z_deg * 3600,
@@ -343,7 +348,7 @@ acacent.ang_z_sm -= (float)(term_dz / 3600.0);
   ACACENT, so each gets its own means and term. Which DATE-OBS sets the
   quarter matters only for an observation that crosses a quarter boundary.
 - **Suggested, not decided:** a parameter to turn it off, like
-  `apply_pericorr`; header keywords recording the term (step 5).
+  `apply_pericorr`; header keywords recording the term (step 5, and below).
 - **Checks:** the term matches the test vectors above; on a real observation,
   `scripts/compare_asol.py` gives 1.0 on each axis.
 """
@@ -421,6 +426,87 @@ for name in ("change y (arcsec)", "change z (arcsec)"):
 summary.pprint(max_width=-1)
 """
 
+markdown_headers = """\
+### Suggested: record the term in the headers
+
+Not needed for the correction itself, and little work: a few header keywords
+saying whether the term was applied, by how much and from which numbers. They
+would let anyone check or redo the term later without the OBC data or the code
+that made it, and let a future calibration tell which observations already
+have the term, so none is corrected twice.
+
+| Keyword | Value | Why |
+|---|---|---|
+| `GTRMAPP` | `APPLIED`, or why not: `NOREF` (no reference row), `NOTELEM` (no mean gradients), `NOFIDS` (no normal fid centroids), `OFF` (turned off) | Tells "no term" from a term of 0 |
+| `GTRM_DY`, `GTRM_DZ` | The term, arcsec | What was applied; the fid shift is this / 3600, in degrees |
+| `GTRM_G3`, `GTRM_G6` | The mean gradients used, K | To check or redo the term without the OBC files |
+| `GTRM_R3`, `GTRM_R6` | The reference values used, K | The same, and in case a table row is revised |
+| `GTRM_QTR` | The reference quarter, such as `2020Q4` | Which row |
+| `GTRM_VER` | A short version or date for the coefficients and reference table | The numbers change: a row each quarter, new coefficients after a recalibration |
+
+Plus a `HISTORY` line in words.
+
+- **Where:** the ACACENT header, where the correction happens, and the aspect
+  solution's (`asol1`), with at least `GTRMAPP`, `GTRM_DY`, `GTRM_DZ` and
+  `GTRM_VER`: users and astromon see the aspect solution, not ACACENT
+  (`download_chandra_obsid` doesn't fetch ACACENT). Whether the pipeline's
+  keyword pipes (`update_prim_keys`, `update_princ_keys`) can carry them there
+  is not checked.
+- **FITS limits:** names up to 8 characters, cards of 80, string values up to
+  68 characters, `HISTORY` text up to 72 characters per card. All of these
+  fit; keep `GTRM_VER` short. Longer names would need the non-standard
+  HIERARCH convention.
+- **Names and format** are only a suggestion; CXC's keyword conventions come
+  first. `gradient_term.py` has no version constant yet; its numbers carry the
+  date they were made, used below.
+
+The cards for the example above, then for the same aspect interval moved to
+2001, before the reference table starts:
+"""
+
+code_headers = r'''
+def suggested_header(record: dict, version: str) -> fits.Header:
+    """The suggested header keywords for one aspect interval, from gradient_term_fid_correction()'s record."""
+    header = fits.Header()
+    header["GTRMAPP"] = (record["status"], "gradient absolute corr applied")
+    if record["applied"]:
+        header["GTRM_DY"] = (round(record["term_dy"], 4), "[arcsec] gradient term dy")
+        header["GTRM_DZ"] = (round(record["term_dz"], 4), "[arcsec] gradient term dz")
+        for number, name in zip("36", gradient_term.GRADIENT_MSIDS, strict=True):
+            header[f"GTRM_G{number}"] = (
+                round(record["means"][name], 6),
+                f"[K] mean {name} over the fid time range",
+            )
+        for number, name in zip("36", gradient_term.GRADIENT_MSIDS, strict=True):
+            header[f"GTRM_R{number}"] = (
+                record["references"][name],
+                f"[K] reference {name}",
+            )
+        header["GTRM_QTR"] = (record["quarter"], "gradient term reference quarter")
+    header["GTRM_VER"] = (version, "gradient term coefficients and reference table")
+    if record["applied"]:
+        header.add_history(
+            f"gradient term: fid ang_y_sm -= {record['shift_y_deg']:.9f},"
+            f" ang_z_sm -= {record['shift_z_deg']:.9f} deg"
+        )
+    return header
+
+
+VERSION = "2026-11-23"  # the date the numbers in gradient_term.py were made
+header = suggested_header(record, VERSION)
+print(repr(header))
+print()
+_, record_2001 = gradient_term_fid_correction(
+    "2001-06-01T00:00:00", acacent, [0, 1, 2], obc
+)
+print(repr(suggested_header(record_2001, VERSION)))
+print()
+print(
+    "every card fits in 80 characters:",
+    all(len(card.image) == 80 for card in header.cards),
+)
+'''
+
 markdown_fid_test = """\
 ### Tested in the aspect pipeline
 
@@ -461,6 +547,8 @@ nb.cells = [
     nbf.v4.new_markdown_cell(markdown_c),
     nbf.v4.new_markdown_cell(markdown_example),
     nbf.v4.new_code_cell(code_example.strip("\n")),
+    nbf.v4.new_markdown_cell(markdown_headers),
+    nbf.v4.new_code_cell(code_headers.strip("\n")),
     nbf.v4.new_markdown_cell(markdown_fid_test),
     nbf.v4.new_markdown_cell(markdown_module),
     nbf.v4.new_code_cell(code_module.strip("\n")),
