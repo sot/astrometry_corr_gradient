@@ -16,11 +16,12 @@ import nbformat as nbf
 HERE = Path(__file__).parent
 
 markdown_intro = """\
-# Gradient term: prototype
+# Add an absolute astrometry correction using the periscope gradients OOBAGRD3 and OOBAGRD6
 
-The gradient term corrects each observation's dz and dy for the periscope
-gradients OOBAGRD3 and OOBAGRD6. CALALIGN is unchanged; the term goes on top
-of it, as a shift of the fid centroids in the aspect pipeline.
+This correction is applied as a shift of the fid centroids, in `aca_corr_fid`.
+Its size is the gradient term, which corrects each observation's dz and dy
+for the periscope gradients OOBAGRD3 and OOBAGRD6. CALALIGN is unchanged; the
+correction goes on top of it.
 
 Everything is in one file, `astrometry_corr_gradient/gradient_term.py`: the
 code, the numbers and the test vectors. It needs only numpy and astropy.

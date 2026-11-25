@@ -1,8 +1,9 @@
-"""The gradient term: what processing needs.
+"""An absolute astrometry correction using the periscope gradients: what processing needs.
 
-The gradient term corrects each observation's dz and dy for the periscope
-gradients OOBAGRD3 and OOBAGRD6. CALALIGN is unchanged; the term goes on top
-of it, as a shift of the fid centroids in the aspect pipeline.
+This correction is applied as a shift of the fid centroids, in aca_corr_fid.
+Its size is the gradient term, which corrects each observation's dz and dy
+for the periscope gradients OOBAGRD3 and OOBAGRD6. CALALIGN is unchanged; the
+correction goes on top of it.
 
 What to implement, for each observation, on each axis (dz and dy)::
 
