@@ -23,6 +23,18 @@ Its size is the gradient term, which corrects each observation's dz and dy
 for the periscope gradients OOBAGRD3 and OOBAGRD6. CALALIGN is unchanged; the
 correction goes on top of it.
 
+The pipeline already corrects the fid centroids with OOBAGRD3 and OOBAGRD6:
+`aca_corr_fid`'s periscope correction, with CALALIGN's PERIFIDCORR
+coefficients. That correction is relative: it removes temporal drift during
+an observation, based on how the gradients change from their mean over the
+observation. So it leaves each observation's average position about where it
+was.
+
+The new correction is absolute: one constant per observation, from how far
+the observation's mean gradients are from the quarter's reference. It moves
+each observation's average position, which the periscope correction leaves
+alone.
+
 Everything is in one file, `astrometry_corr_gradient/gradient_term.py`: the
 code, the numbers and the test vectors. It needs only numpy and astropy.
 
