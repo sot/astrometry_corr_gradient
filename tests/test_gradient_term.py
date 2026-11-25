@@ -16,10 +16,12 @@ from astrometry_corr_gradient.gradient_term import (
     GRADIENT_MSIDS,
     SIGMAS,
     coefficients_per_sigma,
+    fid_centroid_shift,
     gradient_term,
     label_index,
     quarter_index,
     reference_table,
+    shift_fid_centroids,
     vector_table,
 )
 
@@ -101,6 +103,52 @@ def test_gradient_term_needs_both_gradients():
             one_row_table(),
             HAND_COEFFICIENTS,
         )
+
+
+def test_fid_centroid_shift_is_dy_on_ang_y_and_dz_on_ang_z_in_degrees():
+    shift = fid_centroid_shift(
+        ["2024-08-01 00:00:00"],
+        {"OOBAGRD3": [0.3], "OOBAGRD6": [0.04]},
+        one_row_table(),
+        HAND_COEFFICIENTS,
+    )
+    # the terms of test_gradient_term_by_hand: dy 0.2", dz 0.5"
+    assert shift["ang_y_sm"] == pytest.approx([0.2 / 3600])
+    assert shift["ang_z_sm"] == pytest.approx([0.5 / 3600])
+    assert not shift["no_telemetry"][0]
+    assert not shift["no_reference"][0]
+
+
+def test_fid_centroid_shift_is_zero_and_flagged_where_the_term_is():
+    shift = fid_centroid_shift(
+        ["2024-08-01 00:00:00", "2024-08-02 00:00:00", "2024-12-01 00:00:00"],
+        {"OOBAGRD3": [0.3, np.nan, 0.3], "OOBAGRD6": [0.04, 0.04, 0.04]},
+        one_row_table(),
+        HAND_COEFFICIENTS,
+    )
+    assert shift["ang_z_sm"] == pytest.approx([0.5 / 3600, 0.0, 0.0])
+    assert shift["no_telemetry"].tolist() == [False, True, False]
+    assert shift["no_reference"].tolist() == [False, False, True]
+
+
+def test_shift_fid_centroids_moves_every_row_of_the_good_fid_slots_only():
+    slots = np.array([0, 1, 3, 0, 2, 1])  # slot 3 a star; slot 2 a fid that is not good
+    ang_y_sm = np.float32([0.5, -0.6, 0.1, 0.5, 0.7, -0.6])
+    ang_z_sm = np.float32([-0.5, 0.4, 0.2, -0.5, 0.3, 0.4])
+    new_y, new_z = shift_fid_centroids(slots, ang_y_sm, ang_z_sm, [0, 1], 1e-4, -2e-4)
+    good = np.array([True, True, False, True, False, True])
+    assert new_y == pytest.approx(np.where(good, ang_y_sm - 1e-4, ang_y_sm), abs=1e-7)
+    assert new_z == pytest.approx(np.where(good, ang_z_sm + 2e-4, ang_z_sm), abs=1e-7)
+    assert new_y[~good].tolist() == ang_y_sm[~good].tolist()  # untouched exactly
+
+
+def test_shift_fid_centroids_keeps_the_column_type_and_leaves_the_input_alone():
+    ang_y_sm = np.float32([0.5, 0.5])
+    new_y, _ = shift_fid_centroids(
+        [0, 0], ang_y_sm, np.float32([0.1, 0.1]), [0], 1e-4, 0.0
+    )
+    assert new_y.dtype == np.float32
+    assert ang_y_sm.tolist() == [np.float32(0.5), np.float32(0.5)]
 
 
 def test_gradient_term_uses_the_embedded_data_by_default():

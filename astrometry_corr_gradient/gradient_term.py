@@ -2,15 +2,17 @@
 
 The gradient term corrects each observation's dz and dy for the periscope
 gradients OOBAGRD3 and OOBAGRD6. CALALIGN is unchanged; the term goes on top
-of it.
+of it, as a shift of the fid centroids in the aspect pipeline.
 
 What to implement, for each observation, on each axis (dz and dy)::
 
     term = c3 * (OOBAGRD3 - ref3) + c6 * (OOBAGRD6 - ref6)
 
-- OOBAGRD3, OOBAGRD6: the observation's mean of each gradient, in K, over its
-  dwell (from the end of its maneuver to the start of the next), with
-  telemetry in safing intervals masked. We average cheta's 5-minute means.
+- OOBAGRD3, OOBAGRD6: the observation's mean of each gradient, in K. In the
+  aspect pipeline, the means aca_corr_fid already computes (below). The
+  calibration averaged cheta's 5-minute means over the dwell (from the end of
+  its maneuver to the start of the next), with telemetry in safing intervals
+  masked.
 - c3, c6: ``COEFFICIENTS``, arcsec per K. One pair per axis for the whole
   mission.
 - ref3, ref6: the row of ``reference_table()`` for the calendar quarter (UTC)
@@ -20,6 +22,35 @@ What to implement, for each observation, on each axis (dz and dy)::
 - No term if a gradient is missing or the table has no row for the quarter:
   the term is 0 and the observation is flagged.
 - Check an implementation against ``vector_table()``, the test vectors.
+
+Applying it: shift the fid centroids. In ``aca_corr_fid`` (ds15
+``tool_functions.c``, ``apply_centroid_correction()``), after the thermal and
+periscope corrections, subtract the term, in degrees, from every row of every
+good fid slot::
+
+    ang_y_sm -= term_dy / 3600
+    ang_z_sm -= term_dz / 3600
+
+- dy goes with ang_y_sm and dz with ang_z_sm, with the same sign.
+  ``fid_centroid_shift()`` gives the two numbers.
+- The gradients are ``meanGradient3`` and ``meanGradient6``, which
+  aca_corr_fid already computes for the periscope correction: the mean of the
+  OBC engineering samples over the fid centroids' time range, bad samples
+  interpolated. Without them (no usable OBC data, or the periscope correction
+  turned off) there is no term.
+- With the periscope correction, each good fid centroid becomes::
+
+      ang_y_sm -= peri_y_grd3 * (G3(t) - mean G3) + peri_y_grd6 * (G6(t) - mean G6)
+                  + term_dy / 3600
+
+  and likewise ang_z_sm with the z coefficients and term_dz. The periscope
+  correction removes how the gradients change during the observation; the
+  term removes how far their mean is from the quarter's reference.
+- Tested on 2026-11-25 with obsid 23059 (ACIS-S, 2020-10-27; term dy
+  +0.593", dz +0.436"): the new aspect solution moves X-ray events by 0.997
+  times minus the term on both axes, and the median offset of the three
+  catalog-matched sources goes from 0.61" to 0.14". ``scripts/shift_fids.py``
+  and ``scripts/compare_asol.py`` repeat the test on another observation.
 
 The same term, normalized::
 
@@ -32,9 +63,9 @@ The same term, normalized::
 
 Still open:
 
-- How the term enters processing: which positions or alignment it corrects,
-  and with which sign there.
-- The averaging window: the dwell, as here, or the observation's GTI span.
+- The averaging window: aca_corr_fid's fid time range, the dwell (as in the
+  calibration), or the observation's GTI span. On 23059 the fid-range and
+  dwell means give terms within 0.0005".
 - The reference table starts at 2004Q1 for now, so observations before 2004
   get no term. Rows back to 2000Q1 will be added; there is no gradient
   telemetry before 2000.
@@ -168,6 +199,57 @@ def gradient_term(
         "no_telemetry": no_telemetry,
         "no_reference": no_reference & ~no_telemetry,
     }
+
+
+def fid_centroid_shift(
+    times,
+    gradients: dict,
+    references: Table | None = None,
+    coefficients: dict | None = None,
+) -> dict[str, np.ndarray]:
+    """What to subtract from each good fid centroid, in degrees: the dy term from ang_y_sm, dz from ang_z_sm.
+
+    Takes the same arguments as ``gradient_term()``. Returns ``ang_y_sm`` and
+    ``ang_z_sm`` (deg) and the term's ``no_telemetry`` and ``no_reference``
+    flags; flagged observations get 0.
+
+    >>> gradients = {"OOBAGRD3": -0.139041, "OOBAGRD6": 0.083546}  # obsid 23059
+    >>> shift = fid_centroid_shift("2020-10-27T18:19:13", gradients)
+    >>> term = gradient_term("2020-10-27T18:19:13", gradients)
+    >>> bool(np.allclose(shift["ang_y_sm"] * 3600, term["dy"]))
+    True
+    """
+    term = gradient_term(times, gradients, references, coefficients)
+    return {
+        "ang_y_sm": term["dy"] / 3600,
+        "ang_z_sm": term["dz"] / 3600,
+        "no_telemetry": term["no_telemetry"],
+        "no_reference": term["no_reference"],
+    }
+
+
+def shift_fid_centroids(
+    slots,
+    ang_y_sm,
+    ang_z_sm,
+    good_fid_slots,
+    shift_y_deg: float,
+    shift_z_deg: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fid centroids with the gradient term applied: every row of a good fid slot, minus the shift (deg).
+
+    ``slots``, ``ang_y_sm`` and ``ang_z_sm`` are ACACENT columns, one value per
+    row; ``good_fid_slots`` are the FIDPROPS slots whose id_status starts with
+    GOOD; the shifts come from ``fid_centroid_shift()``. Returns new arrays of
+    the same type; other rows are unchanged.
+    """
+    rows = np.isin(np.asarray(slots), np.asarray(good_fid_slots))
+    shifted = []
+    for column, shift in ((ang_y_sm, shift_y_deg), (ang_z_sm, shift_z_deg)):
+        values = np.array(column)  # a copy, in the column's own type
+        values[rows] = values[rows] - np.asarray(shift, values.dtype)
+        shifted.append(values)
+    return shifted[0], shifted[1]
 
 
 def coefficients_per_sigma(

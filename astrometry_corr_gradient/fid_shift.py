@@ -16,11 +16,11 @@ slot::
     ang_y_sm -= (c_dy3 * (mean G3 - ref3) + c_dy6 * (mean G6 - ref6)) / 3600
     ang_z_sm -= (c_dz3 * (mean G3 - ref3) + c_dz6 * (mean G6 - ref6)) / 3600
 
-with the coefficients and references of ``gradient_term``. That dy goes with
-ang_y and dz with ang_z, with the same sign, is read from the periscope
-coefficients (CALALIGN's PERIFIDCORR), which have the same signs as the
-gradient term's on all four; ``predicted_event_shift()`` checks it on the
-pipeline's output.
+with the coefficients and references of ``gradient_term``
+(``gradient_term.fid_centroid_shift()``). dy goes with ang_y and dz with
+ang_z, with the same sign: on obsid 23059 the new aspect solution moved
+events by 0.997 times minus the term on both axes (``predicted_event_shift()``,
+via ``scripts/compare_asol.py``).
 
 Mirrors ``aca_corr_fid``:
 
@@ -31,10 +31,11 @@ Mirrors ``aca_corr_fid``:
   samples with bad quality are filled by linear interpolation over sample
   index (the nearest good value at either end), then all are averaged.
 
-Assumed, not checked against a real file here: each gradient's quality is
-the QUALITY bit at that column's position (the CXC level-0 convention).
-Compare the means this prints with aca_corr_fid's verbose "Mean Gradient 3"
-and "Mean Gradient 6".
+Each gradient's quality is the QUALITY bit at that column's position, as in
+the real OBC files of obsids 26382 and 23059. Neither had bad samples, so the
+filling is tested only on made-up files. On 26382 the means matched cheta's
+full-resolution means over the same range; aca_corr_fid's verbose output
+("Mean Gradient 3", "Mean Gradient 6") is another check.
 """
 
 import logging
@@ -142,17 +143,18 @@ def fid_shift(date: str, means: dict[str, float]) -> dict:
     ValueError
         If the reference table has no row for the date's quarter, or a mean is missing.
     """
-    term = gradient_term.gradient_term(date, means)
-    if term["no_reference"][0]:
+    shift = gradient_term.fid_centroid_shift(date, means)
+    if shift["no_reference"][0]:
         raise ValueError(f"the reference table has no row for {date}")
-    if term["no_telemetry"][0]:
+    if shift["no_telemetry"][0]:
         raise ValueError(f"missing gradient means: {means}")
+    ang_y_deg, ang_z_deg = float(shift["ang_y_sm"][0]), float(shift["ang_z_sm"][0])
     quarter = gradient_term.quarter_index(date)[0]
     return {
-        "dy_arcsec": float(term["dy"][0]),
-        "dz_arcsec": float(term["dz"][0]),
-        "ang_y_deg": float(term["dy"][0]) / 3600,
-        "ang_z_deg": float(term["dz"][0]) / 3600,
+        "dy_arcsec": ang_y_deg * 3600,
+        "dz_arcsec": ang_z_deg * 3600,
+        "ang_y_deg": ang_y_deg,
+        "ang_z_deg": ang_z_deg,
         "quarter": f"{quarter // 4}Q{quarter % 4 + 1}",
     }
 
@@ -167,9 +169,16 @@ def apply_fid_shift(
     with fits.open(acacent) as hdus:
         table = hdus["ACACENT"]
         rows = np.isin(table.data["slot"], slots)
-        for column, key in (("ang_y_sm", "ang_y_deg"), ("ang_z_sm", "ang_z_deg")):
-            values = table.data[column]
-            values[rows] = values[rows] - np.asarray(shift[key], values.dtype)
+        table.data["ang_y_sm"], table.data["ang_z_sm"] = (
+            gradient_term.shift_fid_centroids(
+                table.data["slot"],
+                table.data["ang_y_sm"],
+                table.data["ang_z_sm"],
+                slots,
+                shift["ang_y_deg"],
+                shift["ang_z_deg"],
+            )
+        )
         header = table.header
         header["GTRM_DY"] = (
             shift["dy_arcsec"],

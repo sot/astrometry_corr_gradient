@@ -17,7 +17,9 @@ quarter.
 
 - `astrometry_corr_gradient/gradient_term.py`: the term itself, with its
   numbers at the end of the file (coefficients, sigmas, reference table, test
-  vectors). Needs only numpy and astropy. This is the handoff.
+  vectors), and how to apply it: subtract it from the fid centroids in
+  `aca_corr_fid` (`fid_centroid_shift()`). Needs only numpy and astropy.
+  This is the handoff.
 - `astrometry_corr_gradient/calibration.py`: from an astromon database to the
   numbers: matched sources, dwells, calibration set, solve.
 - `astrometry_corr_gradient/crossmatch.py`, `calalign.py`, `telemetry.py`,
@@ -50,14 +52,23 @@ per observation.
 `shift_fids.py` needs only Python 3.11+, numpy and astropy; `compare_asol.py`
 also needs Ska's Quaternion package.
 
-1. Run the aspect pipeline through `aca_corr_fid` and stop.
+1. Run the aspect pipeline through `aca_corr_fid` and stop. With runasp:
+   `--pipe-stop-before correct_properties` (`aca_corr_fid` is the
+   `correct_acis_fids` pipe).
 2. `python scripts/shift_fids.py ACACENT FIDPROPS OBCFILE... --in-place`
    (the FIDPROPS and OBC files given to `aca_corr_fid`; `@list` works). Check
    the means it logs against `aca_corr_fid`'s verbose "Mean Gradient 3/6".
-3. Run the rest of the pipeline.
+3. Run the rest of the pipeline. With runasp: the same command with
+   `--pipe-start-at correct_properties` instead.
 4. `python scripts/compare_asol.py ASOL_WITHOUT ASOL_WITH --acacent ACACENT`:
    1.0 on each axis means the new aspect solution moves X-ray events by minus
    the term, as intended.
+
+On obsid 23059 (2026-11-25) this gave 0.997 on both axes. After chandra_repro
+with each aspect solution and celldetect, the three catalog-matched sources'
+offsets went from 0.61" to 0.14" (median). To give chandra_repro a pipeline
+aspect solution, take the archive one out of `primary/` first, or chandra_repro
+uses it instead.
 
 ## Making new numbers
 

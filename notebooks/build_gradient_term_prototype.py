@@ -4,8 +4,9 @@ Run this script to (re)build the notebook from scratch; the notebook itself
 is what gets committed and opened, this script is just how it's produced.
 The gradient term's code and data live in astrometry_corr_gradient/gradient_term.py; the
 notebook says what to implement, shows the coefficients, the reference table
-and the test vectors, then prints the file. gradient_term_validation.ipynb
-checks the residuals with it.
+and the test vectors, says how to apply the term to the fid centroids in
+aca_corr_fid (with obsid 23059 as the worked example and test), then prints
+the file. gradient_term_validation.ipynb checks the residuals with it.
 """
 
 from pathlib import Path
@@ -19,7 +20,7 @@ markdown_intro = """\
 
 The gradient term corrects each observation's dz and dy for the periscope
 gradients OOBAGRD3 and OOBAGRD6. CALALIGN is unchanged; the term goes on top
-of it.
+of it, as a shift of the fid centroids in the aspect pipeline.
 
 Everything is in one file, `astrometry_corr_gradient/gradient_term.py`: the
 code, the numbers and the test vectors. It needs only numpy and astropy.
@@ -28,29 +29,35 @@ code, the numbers and the test vectors. It needs only numpy and astropy.
 
 `term = c3 * (OOBAGRD3 - ref3) + c6 * (OOBAGRD6 - ref6)`
 
-1. **Gradients:** the observation's mean OOBAGRD3 and OOBAGRD6, in K, over its
-   dwell (from the end of its maneuver to the start of the next), with
-   telemetry in safing intervals masked.
+1. **Gradients:** the observation's mean OOBAGRD3 and OOBAGRD6, in K. In the
+   aspect pipeline, the means `aca_corr_fid` already computes for the
+   periscope correction. The calibration averaged them over the dwell (from
+   the end of its maneuver to the start of the next), with telemetry in safing
+   intervals masked.
 2. **Coefficients:** c3 and c6 for the axis, below.
 3. **References:** ref3 and ref6, from the reference table's row for the
    calendar quarter (UTC) of the observation's start time (DATE-OBS).
 4. **Result:** the term in arcsec, the expected X-ray minus catalog offset. The
    corrected offset is the observed one minus the term.
-5. **No term** if a gradient is missing or the quarter has no row: the term is
+5. **Apply:** in `aca_corr_fid`, subtract the term, in degrees, from every good
+   fid centroid: `ang_y_sm -= term_dy / 3600`, `ang_z_sm -= term_dz / 3600`.
+   Details and a test below.
+6. **No term** if a gradient is missing or the quarter has no row: the term is
    0 and the observation is flagged.
-6. **Check:** match the test vectors below.
+7. **Check:** match the test vectors below.
 
 **Still open:**
 
-- How the term enters processing: which positions or alignment it corrects,
-  and with which sign there.
-- The averaging window: the dwell, as here, or the observation's GTI span.
+- The averaging window: `aca_corr_fid`'s fid time range, the dwell (as in the
+  calibration), or the observation's GTI span. On obsid 23059 the fid-range
+  and dwell means give terms within 0.0005".
 - The reference table starts at 2004Q1 for now, so observations before 2004
   get no term. Rows back to 2000Q1 will be added; there is no gradient
   telemetry before 2000.
 
-Below: the coefficients, the reference table, the test vectors, then the whole
-file. `gradient_term_validation.ipynb` shows that the term works.
+Below: the coefficients, the reference table, the test vectors, how to apply
+the term to the fid centroids, then the whole file.
+`gradient_term_validation.ipynb` shows that the term works.
 """
 
 code_setup = r"""
@@ -59,6 +66,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from astropy.table import Table
 from IPython.display import Markdown, display
 
 # this checkout's package, before any installed copy
@@ -145,6 +153,298 @@ for axis_name in gradient_term.AXES:
 vectors.pprint(max_width=-1)
 """
 
+markdown_fid = """\
+## Applying it: shift the fid centroids
+
+The term goes where the periscope correction already is: `aca_corr_fid`
+(ds15 `tool_functions.c`, `apply_centroid_correction()`). That function loops
+over the ACACENT rows and, for every row of every good fid slot, corrects
+`ang_y_sm` and `ang_z_sm` (degrees) twice:
+
+1. **ACIS thermal correction** (`apply_thermalcorr`): scales the fid positions
+   about their center of expansion with the ACIS detector housing
+   temperature. ACIS only; it turns itself off when the good fids are HRC's.
+2. **Periscope correction** (`apply_pericorr`): removes how OOBAGRD3 and
+   OOBAGRD6 change during the observation, relative to their mean (CALALIGN's
+   PERIFIDCORR coefficients). ACIS and HRC.
+
+The term is one more subtraction after those, the same for every row of the
+observation. It needs the periscope correction's mean gradients, so it applies
+wherever the periscope correction does, HRC included:
+
+```
+ang_y_sm -= term_dy / 3600
+ang_z_sm -= term_dz / 3600
+```
+
+- **Axes and sign:** dy goes with `ang_y_sm` and dz with `ang_z_sm`, with the
+  same sign. `gradient_term.fid_centroid_shift()` gives the two numbers, in
+  degrees.
+- **Gradients:** `info->obcinfo.meanGradient3` and `meanGradient6`, which
+  `calc_periscope_corr_values()` already computes: the mean of the OBC
+  engineering samples over the fid centroids' time range, with bad samples
+  interpolated. Without them (no usable OBC data, or `apply_pericorr` off)
+  there is no term.
+- **Reference quarter:** the calendar quarter (UTC) of the observation's start
+  (DATE-OBS).
+
+With the periscope correction, each good fid centroid becomes
+
+```
+ang_y_sm -= peri_y_grd3 * (G3(t) - mean G3) + peri_y_grd6 * (G6(t) - mean G6) + term_dy / 3600
+```
+
+and likewise `ang_z_sm` with the z coefficients and `term_dz`. The periscope
+correction removes how the gradients change during the observation; the term
+removes how far their mean is from the quarter's reference.
+
+Below: the whole correction as runnable Python, step by step; what changes in
+`aca_corr_fid`'s C; an example; and the test in the aspect pipeline.
+"""
+
+markdown_prototype = """\
+### The correction, step by step
+
+`gradient_term_fid_correction()` below is the whole correction for one aspect
+interval, in the order `aca_corr_fid` would run it, on plain ACACENT, FIDPROPS
+and OBC columns. Steps 1 and 2 exist in `aca_corr_fid` already, for the
+periscope correction; they are here so the prototype runs on its own. Steps 3
+to 5 are new. `scripts/shift_fids.py` runs the same steps on real files; it is
+what the aspect pipeline test used.
+"""
+
+code_prototype = r'''
+DATA_NORMAL = 0  # ACACENT status of a normal record (ds15 aspect_lib/acacent.h)
+EGAUSS = 8  # ACACENT alg of the Kalman filter's centroids (asp_l1_std.kalman_alg)
+
+
+def gradient_term_fid_correction(
+    date_obs: str,
+    acacent: Table,
+    good_fid_slots: list[int],
+    obc: Table,
+    kalman_alg: int = EGAUSS,
+) -> tuple[Table, dict]:
+    """The gradient term applied to one aspect interval's fid centroids, as aca_corr_fid would.
+
+    date_obs: DATE-OBS of the ACACENT file.
+    acacent: ACACENT columns time, slot, alg, status, ang_y_sm and ang_z_sm
+        (deg), after the thermal and periscope corrections.
+    good_fid_slots: the FIDPROPS slots whose id_status starts with GOOD (in
+        aca_corr_fid, the slots with info->datndx[slot] >= 0).
+    obc: OBC engineering columns TIME, OOBAGRD3 and OOBAGRD6 (K), and
+        OOBAGRD3_GOOD and OOBAGRD6_GOOD: True where the sample's QUALITY bit
+        is good (aca_corr_fid: *obcptr.quality.oobagrd3 == GOOD_NEW).
+
+    Returns the corrected ACACENT and a record of what was done.
+    """
+    # 1. The fid time range. aca_corr_fid has it: info->sampdata.tmin, tmax.
+    #    The first and last time of the good fid rows with status DATA_NORMAL
+    #    and the Kalman filter's algorithm.
+    usable = (
+        np.isin(acacent["slot"], good_fid_slots)
+        & (acacent["status"] == DATA_NORMAL)
+        & (acacent["alg"] == kalman_alg)
+    )
+    if not usable.any():
+        return acacent, {"applied": False, "reason": "no normal fid centroids"}
+    tmin = float(acacent["time"][usable].min())
+    tmax = float(acacent["time"][usable].max())
+
+    # 2. The mean gradients. aca_corr_fid has them, for the periscope
+    #    correction: info->obcinfo.meanGradient3 and meanGradient6, from
+    #    calc_periscope_corr_values(). The OBC samples with
+    #    tmin <= TIME <= tmax; bad samples filled by linear interpolation over
+    #    sample index (the nearest good value at either end); then the plain
+    #    mean, before any smoothing.
+    in_range = (obc["TIME"] >= tmin) & (obc["TIME"] <= tmax)
+    means = {}
+    for name in gradient_term.GRADIENT_MSIDS:
+        values = np.asarray(obc[name][in_range], float)
+        good = np.asarray(obc[f"{name}_GOOD"][in_range], bool)
+        if not good.any():  # aca_corr_fid turns the periscope correction off too
+            return acacent, {"applied": False, "reason": f"no good {name} samples"}
+        index = np.arange(len(values))
+        means[name] = float(np.mean(np.interp(index, index[good], values[good])))
+
+    # 3. NEW: the term (arcsec) and the fid shift (deg), once per aspect
+    #    interval: COEFFICIENTS, and the reference table's row for DATE-OBS's
+    #    calendar quarter (UTC).
+    shift = gradient_term.fid_centroid_shift(date_obs, means)
+    if shift["no_reference"][0]:  # warn, and leave the centroids as they are
+        return acacent, {"applied": False, "reason": f"no reference row for {date_obs}"}
+    shift_y_deg = float(shift["ang_y_sm"][0])
+    shift_z_deg = float(shift["ang_z_sm"][0])
+
+    # 4. NEW: subtract it from every row of every good fid slot, whatever its
+    #    algorithm or status (as the other two corrections do), after the
+    #    periscope correction. In aca_corr_fid's row loop:
+    #    acacent.ang_y_sm -= (float)(term_dy / 3600.0), and likewise z.
+    corrected = acacent.copy()
+    new_y, new_z = gradient_term.shift_fid_centroids(
+        acacent["slot"],
+        acacent["ang_y_sm"],
+        acacent["ang_z_sm"],
+        good_fid_slots,
+        shift_y_deg,
+        shift_z_deg,
+    )
+    corrected["ang_y_sm"][:] = new_y
+    corrected["ang_z_sm"][:] = new_z
+
+    # 5. NEW, suggested: record it in the ACACENT header, as
+    #    scripts/shift_fids.py does: GTRM_DY and GTRM_DZ (arcsec), GTRM_QTR,
+    #    and a HISTORY line.
+    quarter = int(gradient_term.quarter_index(date_obs)[0])
+    return corrected, {
+        "applied": True,
+        "tmin": tmin,
+        "tmax": tmax,
+        "means": means,
+        "quarter": f"{quarter // 4}Q{quarter % 4 + 1}",
+        "term_dy": shift_y_deg * 3600,
+        "term_dz": shift_z_deg * 3600,
+        "shift_y_deg": shift_y_deg,
+        "shift_z_deg": shift_z_deg,
+        "rows_shifted": int(np.isin(acacent["slot"], good_fid_slots).sum()),
+    }
+'''
+
+markdown_c = """\
+### What changes in `aca_corr_fid`
+
+In `apply_centroid_correction()`, steps 3 and 4 above. `c_dy3` is
+`COEFFICIENTS["dy"]["OOBAGRD3"]` (and so on), and `ref3`, `ref6` are OOBAGRD3
+and OOBAGRD6 from the reference table's row for the quarter:
+
+```c
+/* once, before the row loop: the gradient term (arcsec) */
+double g3 = info->obcinfo.meanGradient3 - ref3;
+double g6 = info->obcinfo.meanGradient6 - ref6;
+double term_dy = c_dy3 * g3 + c_dy6 * g6;
+double term_dz = c_dz3 * g3 + c_dz6 * g6;
+
+/* each row of a good fid slot, after the periscope correction */
+acacent.ang_y_sm -= (float)(term_dy / 3600.0);
+acacent.ang_z_sm -= (float)(term_dz / 3600.0);
+```
+
+- **Already in `aca_corr_fid`:** the good fid slots (`info->datndx`), the fid
+  time range (`info->sampdata.tmin`, `tmax`) and the mean gradients
+  (`info->obcinfo.meanGradient3`, `meanGradient6`).
+- **New inputs:** the ACACENT file's DATE-OBS, for the calendar quarter (UTC);
+  `COEFFICIENTS` and the reference table from `gradient_term.py`. The table
+  gets a new row each quarter, from the previous quarter's observations.
+- **No term** (warn, and leave the centroids as they are) when the mean
+  gradients don't exist (the periscope correction is off or has no usable OBC
+  data), or the reference table has no row for the quarter (before 2004Q1 for
+  now, or a quarter not yet added).
+- **More than one aspect interval:** `aca_corr_fid` runs on each interval's
+  ACACENT, so each gets its own means and term. Which DATE-OBS sets the
+  quarter matters only for an observation that crosses a quarter boundary.
+- **Suggested, not decided:** a parameter to turn it off, like
+  `apply_pericorr`; header keywords recording the term (step 5).
+- **Checks:** the term matches the test vectors above; on a real observation,
+  `scripts/compare_asol.py` gives 1.0 on each axis.
+"""
+
+markdown_example = """\
+### Example
+
+A made-up aspect interval with obsid 23059's DATE-OBS and mean gradients
+(ACIS-S, 2020-10-27): ACACENT rows every 2.05 s for 5 minutes, good fid slots
+0 to 2 and star slots 3 to 7, and OBC samples every 32.8 s with one bad sample
+in the range. The fids move by minus the term; the stars don't move.
+"""
+
+code_example = r"""
+start = 720209953.786
+times = start + np.arange(0.0, 300.0, 2.05)
+positions = {  # made-up (ang_y_sm, ang_z_sm) of each slot, deg
+    0: (0.6853, -0.4319),
+    1: (-0.5902, -0.4317),
+    2: (0.1207, 0.6612),
+    3: (0.3101, 0.2203),
+    4: (-0.4417, 0.5120),
+    5: (0.0954, -0.6630),
+    6: (-0.2381, -0.1179),
+    7: (0.5560, 0.4021),
+}
+slots = np.repeat(np.array(list(positions), np.uint8), len(times))
+acacent = Table(
+    {
+        "time": np.tile(times, len(positions)),
+        "slot": slots,
+        "alg": np.full(len(slots), EGAUSS, np.uint8),
+        "status": np.full(len(slots), DATA_NORMAL, np.uint8),
+        "ang_y_sm": np.float32([positions[slot][0] for slot in slots]),
+        "ang_z_sm": np.float32([positions[slot][1] for slot in slots]),
+    }
+)
+obc_times = start - 40.0 + np.arange(0.0, 400.0, 32.8)
+obc = Table(
+    {
+        "TIME": obc_times,
+        "OOBAGRD3": np.full(len(obc_times), -0.139041),  # 23059's mean, K
+        "OOBAGRD6": np.full(len(obc_times), 0.083546),
+        "OOBAGRD3_GOOD": np.ones(len(obc_times), bool),
+        "OOBAGRD6_GOOD": np.ones(len(obc_times), bool),
+    }
+)
+obc["OOBAGRD3"][4], obc["OOBAGRD3_GOOD"][4] = 99.0, False  # a bad sample, filled
+
+corrected, record = gradient_term_fid_correction(
+    "2020-10-27T18:19:13", acacent, [0, 1, 2], obc
+)
+for key, value in record.items():
+    print(f"{key}: {value}")
+
+# the first row of each slot, before and after (float32, as in ACACENT, so the
+# change is exact to about 0.0002")
+first = np.unique(acacent["slot"], return_index=True)[1]
+summary = Table(
+    {
+        "slot": acacent["slot"][first],
+        "good fid": np.isin(acacent["slot"][first], [0, 1, 2]),
+        "ang_y_sm before": acacent["ang_y_sm"][first],
+        "ang_y_sm after": corrected["ang_y_sm"][first],
+        "ang_z_sm before": acacent["ang_z_sm"][first],
+        "ang_z_sm after": corrected["ang_z_sm"][first],
+        "change y (arcsec)": 3600
+        * (corrected["ang_y_sm"][first].astype(float) - acacent["ang_y_sm"][first]),
+        "change z (arcsec)": 3600
+        * (corrected["ang_z_sm"][first].astype(float) - acacent["ang_z_sm"][first]),
+    }
+)
+for name in ("change y (arcsec)", "change z (arcsec)"):
+    summary[name].format = "+.4f"
+summary.pprint(max_width=-1)
+"""
+
+markdown_fid_test = """\
+### Tested in the aspect pipeline
+
+On obsid 23059 the aspect pipeline ran twice: as usual, and with the fid
+centroids shifted as above, by `scripts/shift_fids.py` right after
+`aca_corr_fid`. Its log matched the example: term dy +0.5928", dz +0.4364";
+ang_y_sm -= 0.000164668 deg, ang_z_sm -= 0.000121215 deg, on 58,752 rows of 3
+good fid slots. (The example starts from the means as the log printed them,
+to 6 decimals, so its last digit in degrees can differ.)
+
+- **Aspect solution:** the shifted run's aspect solution moves X-ray events by
+  -0.591" in y and -0.435" in z, 0.997 times minus the term on both axes
+  (`scripts/compare_asol.py`). A wrong sign would give -1; swapped axes, 0.74
+  and 1.36. The shift shows up first in the aspect solution's dy and dz, then,
+  after `asp_offaxis_corr` at the end of the pipeline, in its attitude.
+- **Sources:** after chandra_repro with each aspect solution and celldetect,
+  the three sources matched to catalog counterparts moved by the same amount.
+  Their offsets from the catalog went from 0.61", 0.49" and 0.68" to 0.14",
+  0.25" and 0.07".
+
+23059 is in the calibration set, so this checks how the term is applied, not
+the term itself; `gradient_term_validation.ipynb` checks the term.
+"""
+
 nb = nbf.v4.new_notebook()
 nb.cells = [
     nbf.v4.new_markdown_cell(markdown_intro),
@@ -155,6 +455,13 @@ nb.cells = [
     nbf.v4.new_code_cell(code_references.strip("\n")),
     nbf.v4.new_markdown_cell(markdown_vectors),
     nbf.v4.new_code_cell(code_vectors.strip("\n")),
+    nbf.v4.new_markdown_cell(markdown_fid),
+    nbf.v4.new_markdown_cell(markdown_prototype),
+    nbf.v4.new_code_cell(code_prototype.strip("\n")),
+    nbf.v4.new_markdown_cell(markdown_c),
+    nbf.v4.new_markdown_cell(markdown_example),
+    nbf.v4.new_code_cell(code_example.strip("\n")),
+    nbf.v4.new_markdown_cell(markdown_fid_test),
     nbf.v4.new_markdown_cell(markdown_module),
     nbf.v4.new_code_cell(code_module.strip("\n")),
 ]
