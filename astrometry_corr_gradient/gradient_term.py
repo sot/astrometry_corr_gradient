@@ -71,8 +71,10 @@ Still open:
   get no term. Rows back to 2000Q1 will be added; there is no gradient
   telemetry before 2000.
 
-Units are K. The gradients are temperature differences, so degC gives the same
-numbers; divide a degF difference by 1.8.
+Units are K, as the OBC files label the gradients. Each gradient is a
+temperature difference between two periscope thermistors (OOBAGRD3: RT 505 to
+RT 504; OOBAGRD6: RT 507 to RT 506), so these K are delta K: degC gives the
+same numbers; divide a degF difference by 1.8.
 
 Needs only numpy and astropy. The numbers at the end of this file are written
 by ``scripts/update_gradient_term_data.py``; don't edit them by hand.

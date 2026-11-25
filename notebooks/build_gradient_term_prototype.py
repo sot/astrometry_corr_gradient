@@ -30,8 +30,10 @@ code, the numbers and the test vectors. It needs only numpy and astropy.
 
 `term = c3 * (OOBAGRD3 - ref3) + c6 * (OOBAGRD6 - ref6)`
 
-1. **Gradients:** the observation's mean OOBAGRD3 and OOBAGRD6, in K. In the
-   aspect pipeline, the means `aca_corr_fid` already computes for the
+1. **Gradients:** the observation's mean OOBAGRD3 and OOBAGRD6, in K. Each is a
+   temperature difference between two periscope thermistors (RT 505 to RT 504,
+   and RT 507 to RT 506, as the OBC files describe them), so these K are delta
+   K. In the aspect pipeline, the means `aca_corr_fid` already computes for the
    periscope correction. The calibration averaged them over the dwell (from
    the end of its maneuver to the start of the next), with telemetry in safing
    intervals masked.
