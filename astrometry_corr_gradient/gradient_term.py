@@ -17,7 +17,12 @@ What to implement, for each observation, on each axis (dz and dy)::
 - c3, c6: ``COEFFICIENTS``, arcsec per K. One pair per axis for the whole
   mission.
 - ref3, ref6: the row of ``reference_table()`` for the calendar quarter (UTC)
-  of the observation's start time (DATE-OBS).
+  of the observation's start time (DATE-OBS): each gradient's median over a
+  quarter's observations. With fixed coefficients, c3 * OOBAGRD3 +
+  c6 * OOBAGRD6 drifts over the mission as the gradients drift (about 3" in
+  dy and 2" in dz since 2004). Subtracting the quarter's references removes
+  that drift: the correction's median over a quarter is close to zero, and
+  each quarter's median offset stays where CALALIGN puts it.
 - The term is in arcsec: the expected X-ray minus catalog offset. The
   corrected offset is the observed one minus the term.
 - No term if a gradient is missing or the table has no row for the quarter:

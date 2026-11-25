@@ -39,7 +39,9 @@ code, the numbers and the test vectors. It needs only numpy and astropy.
    intervals masked.
 2. **Coefficients:** c3 and c6 for the axis, below.
 3. **References:** ref3 and ref6, from the reference table's row for the
-   calendar quarter (UTC) of the observation's start time (DATE-OBS).
+   calendar quarter (UTC) of the observation's start time (DATE-OBS). They
+   remove the drift that fixed coefficients would otherwise give over the
+   mission; see below.
 4. **Result:** the term in arcsec, the expected X-ray minus catalog offset. The
    corrected offset is the observed one minus the term.
 5. **Apply:** in `aca_corr_fid`, subtract the term, in degrees, from every good
@@ -122,6 +124,56 @@ print(
         for axis_name, by_gradient in per_sigma.items()
     },
 )
+"""
+
+markdown_drift = """\
+## Why the references: removing the drift
+
+With fixed coefficients for the whole mission, `c3 * OOBAGRD3 + c6 * OOBAGRD6`
+drifts over the mission, because the gradients drift: OOBAGRD3 from about
+0.85 K in 2004 to about -0.35 K now, and OOBAGRD6 from about 0.04 K to 0.14 K.
+That comes to about 3" in dy and 2" in dz since 2004 (table below). This
+correction should not take out that slow drift; CALALIGN handles the slow
+changes in the offsets. The coefficients themselves were fit within each
+quarter, so they only describe how the offsets follow the gradients over
+weeks to months.
+
+We compensate for the drift with time-based references. Each calendar
+quarter's reference is the median of each gradient over that quarter's
+observations, and the correction is measured from it:
+
+`term = c3 * (OOBAGRD3 - ref3) + c6 * (OOBAGRD6 - ref6)`
+
+This subtracts the correction's typical value in each quarter, so over a
+quarter's observations its median is close to zero: typically 0.005", at most
+0.08". (Not exactly zero, because the medians are taken of each gradient, not
+of the correction.) The correction then removes only how each observation
+differs from the quarter's typical one, which narrows the scatter; each
+quarter's median offset stays where CALALIGN puts it.
+
+Past quarters use their own observations. A new quarter's observations are
+processed before the quarter is over, so from the release on each new quarter
+uses the previous quarter's medians, and the table gains a row each quarter.
+
+The drift the references remove: the correction at each quarter's typical
+gradients, `c3 * ref3 + c6 * ref6`, every second year:
+"""
+
+code_drift = r"""
+references = gradient_term.reference_table()
+drift = references["quarter", "OOBAGRD3", "OOBAGRD6"]
+for axis_name in gradient_term.AXES:
+    drift[f"{axis_name} drift"] = np.round(
+        sum(
+            gradient_term.COEFFICIENTS[axis_name][name]
+            * np.asarray(references[name], float)
+            for name in gradient_term.GRADIENT_MSIDS
+        ),
+        2,
+    )
+    drift[f"{axis_name} drift"].unit = "arcsec"
+rows = sorted(set(range(0, len(drift), 8)) | {len(drift) - 1})
+drift[rows].pprint(max_width=-1)
 """
 
 markdown_references = """\
@@ -540,6 +592,8 @@ nb.cells = [
     nbf.v4.new_code_cell(code_setup.strip("\n")),
     nbf.v4.new_markdown_cell(markdown_coefficients),
     nbf.v4.new_code_cell(code_coefficients.strip("\n")),
+    nbf.v4.new_markdown_cell(markdown_drift),
+    nbf.v4.new_code_cell(code_drift.strip("\n")),
     nbf.v4.new_markdown_cell(markdown_references),
     nbf.v4.new_code_cell(code_references.strip("\n")),
     nbf.v4.new_markdown_cell(markdown_vectors),
